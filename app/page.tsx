@@ -125,6 +125,18 @@ const DEFAULT_PLAYERS: Player[] = [
   { name: '도전가', score: 1000 }
 ];
 
+// 블록 템플릿 정의 (8가지)
+const BLOCK_TEMPLATES: { shape: number[][]; color: string }[] = [
+  { shape: [[1]], color: 'from-pink-500 to-rose-500' }, // 1x1
+  { shape: [[1, 1]], color: 'from-amber-400 to-orange-500' }, // 2x1 가로
+  { shape: [[1], [1]], color: 'from-orange-400 to-red-500' }, // 1x2 세로
+  { shape: [[1, 1, 1]], color: 'from-emerald-400 to-teal-500' }, // 3x1 가로
+  { shape: [[1], [1], [1]], color: 'from-teal-400 to-cyan-500' }, // 1x3 세로
+  { shape: [[1, 1], [1, 1]], color: 'from-blue-500 to-indigo-600' }, // 2x2 사각형
+  { shape: [[1, 0], [1, 1]], color: 'from-violet-500 to-purple-600' }, // L자 (3칸)
+  { shape: [[0, 1, 0], [1, 1, 1]], color: 'from-fuchsia-500 to-pink-600' } // T자 (4칸)
+];
+
 export default function BlockPuzzleGame() {
   // ==========================================
   // 2. States & Auth Context
@@ -154,6 +166,7 @@ export default function BlockPuzzleGame() {
   const [geminiBlockQueue, setGeminiBlockQueue] = useState<Omit<Block, 'id' | 'width' | 'height'>[]>([]);
   const [blockPool, setBlockPool] = useState<(Block | null)[]>([]);
   const [aiGenerating, setAiGenerating] = useState<boolean>(false);
+  const [isAiMode, setIsAiMode] = useState<boolean>(true);
   
   // 랭킹 & 최고 기록 (로컬 저장소 백업용)
   const [players, setPlayers] = useState<Player[]>([]);
@@ -254,6 +267,20 @@ export default function BlockPuzzleGame() {
     setWarningTimeout(to);
   };
 
+  // 랜덤 블록 생성 (Fallback 모드용)
+  const generateRandomBlock = (): Block => {
+    const templateIdx = Math.floor(Math.random() * BLOCK_TEMPLATES.length);
+    const template = BLOCK_TEMPLATES[templateIdx];
+    const shape = template.shape;
+    return {
+      id: Math.random().toString(36).substr(2, 9),
+      shape,
+      color: template.color,
+      width: shape[0].length,
+      height: shape.length
+    };
+  };
+
   // 게임 시작 (난이도 선택 시 호출)
   const startGame = async (diff: DifficultyType) => {
     setDifficulty(diff);
@@ -298,6 +325,9 @@ export default function BlockPuzzleGame() {
       const data = await res.json();
       const generated: Omit<Block, 'id' | 'width' | 'height'>[] = data.blocks;
 
+      // AI 모드 활성화
+      setIsAiMode(true);
+
       // 2. 받아온 블록 리스트를 큐에 보관
       setGeminiBlockQueue(generated);
 
@@ -328,6 +358,9 @@ export default function BlockPuzzleGame() {
       console.error('Gemini 블록 구성 에러:', err);
       triggerWarning('AI 블록 생성에 실패하여 로컬 기본 블록으로 시작합니다.');
       
+      // AI 모드 비활성화 (무한 기본 블록 모드)
+      setIsAiMode(false);
+
       // Fallback: Gemini 실패 시 기본 블록 템플릿 무한 모드로 세팅
       const fallbackTemplates = [
         { shape: [[1]], color: 'from-pink-500 to-rose-500' },
@@ -408,6 +441,13 @@ export default function BlockPuzzleGame() {
           if (grid[targetRow][targetCol] !== null) {
             return false;
           }
+
+          // [추가] 목표 패턴 영역이 아닌 곳에는 배치 불가능하게 차단
+          if (targetPattern && targetPattern.length > 0) {
+            if (!targetPattern[targetRow]?.[targetCol]) {
+              return false;
+            }
+          }
         }
       }
     }
@@ -440,22 +480,27 @@ export default function BlockPuzzleGame() {
 
     // 사용한 블록을 큐에서 1개 공급받아 채워 넣음
     const newPool = [...blockPool];
-    if (geminiBlockQueue.length > 0) {
-      const nextBlock = geminiBlockQueue[0];
-      const nextQueue = geminiBlockQueue.slice(1);
-      
-      newPool[blockIdx] = {
-        id: Math.random().toString(36).substr(2, 9),
-        shape: nextBlock.shape,
-        color: nextBlock.color,
-        width: nextBlock.shape[0].length,
-        height: nextBlock.shape.length
-      };
-      
-      setGeminiBlockQueue(nextQueue);
+    if (isAiMode) {
+      if (geminiBlockQueue.length > 0) {
+        const nextBlock = geminiBlockQueue[0];
+        const nextQueue = geminiBlockQueue.slice(1);
+        
+        newPool[blockIdx] = {
+          id: Math.random().toString(36).substr(2, 9),
+          shape: nextBlock.shape,
+          color: nextBlock.color,
+          width: nextBlock.shape[0].length,
+          height: nextBlock.shape.length
+        };
+        
+        setGeminiBlockQueue(nextQueue);
+      } else {
+        // 더 이상 큐에 블록이 없으면 해당 슬롯은 null 비움
+        newPool[blockIdx] = null;
+      }
     } else {
-      // 더 이상 큐에 블록이 없으면 해당 슬롯은 null 비움
-      newPool[blockIdx] = null;
+      // Fallback 모드: 무한정으로 랜덤 블록을 생성
+      newPool[blockIdx] = generateRandomBlock();
     }
 
     setBlockPool(newPool);
@@ -480,18 +525,20 @@ export default function BlockPuzzleGame() {
       if (!isPatternFilled) break;
     }
 
-    // 2. 준비된 정답 블록도 모두 소진했는지 검사
-    const poolActiveCount = currentPool.filter(b => b !== null).length;
-    const isQueueEmpty = geminiBlockQueue.length === 0 && poolActiveCount === 0;
+    if (isAiMode) {
+      // AI 모드: 준비된 정답 블록도 모두 소진했는지 검사
+      const poolActiveCount = currentPool.filter(b => b !== null).length;
+      const isQueueEmpty = geminiBlockQueue.length === 0 && poolActiveCount === 0;
 
-    // 만약 정답 블록 큐가 다 떨어졌는데(0개) 격자판을 덜 채웠다면, 더 이상 놓을 수 없는 상태
-    if (geminiBlockQueue.length === 0 && poolActiveCount > 0 && !isPatternFilled) {
-      // 큐는 0개이고 풀만 남았는데, 남은 풀의 블록들을 다 써야만 완성이 되도록 유도
-    }
-
-    // 최종 완벽 클리어 조건: 패턴 다 채움 AND 모든 정답 블록 소진
-    if (isPatternFilled && isQueueEmpty) {
-      handleClear(currentGrid);
+      // 최종 완벽 클리어 조건: 패턴 다 채움 AND 모든 정답 블록 소진
+      if (isPatternFilled && isQueueEmpty) {
+        handleClear(currentGrid);
+      }
+    } else {
+      // Fallback 모드: 패턴만 다 채워지면 무조건 클리어
+      if (isPatternFilled) {
+        handleClear(currentGrid);
+      }
     }
   };
 
