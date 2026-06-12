@@ -1,6 +1,8 @@
 'use client';
 
 import React, { useState, useEffect, useRef } from 'react';
+import { useAuth } from '../context/AuthContext';
+import Link from 'next/link';
 
 // ==========================================
 // 1. Types & Data Definitions
@@ -9,12 +11,6 @@ import React, { useState, useEffect, useRef } from 'react';
 interface Player {
   name: string;
   score: number;
-}
-
-interface BestTimes {
-  '하': number | null;
-  '중': number | null;
-  '상': number | null;
 }
 
 interface Block {
@@ -122,19 +118,7 @@ const PATTERNS: Record<DifficultyType, Record<'사과' | '꽃' | '케이크', bo
   }
 };
 
-// 블록 템플릿 정의 (5~7가지)
-const BLOCK_TEMPLATES: { shape: number[][]; color: string }[] = [
-  { shape: [[1]], color: 'from-pink-500 to-rose-500' }, // 1x1
-  { shape: [[1, 1]], color: 'from-amber-400 to-orange-500' }, // 2x1 가로
-  { shape: [[1], [1]], color: 'from-orange-400 to-red-500' }, // 1x2 세로
-  { shape: [[1, 1, 1]], color: 'from-emerald-400 to-teal-500' }, // 3x1 가로
-  { shape: [[1], [1], [1]], color: 'from-teal-400 to-cyan-500' }, // 1x3 세로
-  { shape: [[1, 1], [1, 1]], color: 'from-blue-500 to-indigo-600' }, // 2x2 사각형
-  { shape: [[1, 0], [1, 1]], color: 'from-violet-500 to-purple-600' }, // L자 (3칸)
-  { shape: [[0, 1, 0], [1, 1, 1]], color: 'from-fuchsia-500 to-pink-600' } // T자 (4칸)
-];
-
-// 디폴트 랭킹 데이터 (로컬 스토리지에 플레이어 데이터가 없을 때 사용)
+// 디폴트 로컬 랭킹 데이터 (Supabase 동기화 전 혹은 게스트용)
 const DEFAULT_PLAYERS: Player[] = [
   { name: '빛나는퍼즐왕', score: 2500 },
   { name: '블록마스터', score: 1800 },
@@ -143,8 +127,19 @@ const DEFAULT_PLAYERS: Player[] = [
 
 export default function BlockPuzzleGame() {
   // ==========================================
-  // 2. States
+  // 2. States & Auth Context
   // ==========================================
+  const { 
+    user, 
+    guestId, 
+    isGuest, 
+    userScore, 
+    signOut, 
+    updateUserScore, 
+    pendingMigrationScore, 
+    migrateGuestScore 
+  } = useAuth();
+
   const [screen, setScreen] = useState<ScreenType>('home');
   const [showDiffModal, setShowDiffModal] = useState(false);
   const [difficulty, setDifficulty] = useState<DifficultyType | null>(null);
@@ -155,73 +150,58 @@ export default function BlockPuzzleGame() {
   const [targetShapeName, setTargetShapeName] = useState<'사과' | '꽃' | '케이크' | ''>('');
   const [targetPattern, setTargetPattern] = useState<boolean[][]>([]);
   
-  // 3가지 제시되는 블록 풀
-  const [blockPool, setBlockPool] = useState<Block[]>([]);
+  // Gemini 블록 큐 및 현재 활성화된 3개 블록 풀
+  const [geminiBlockQueue, setGeminiBlockQueue] = useState<Omit<Block, 'id' | 'width' | 'height'>[]>([]);
+  const [blockPool, setBlockPool] = useState<(Block | null)[]>([]);
+  const [aiGenerating, setAiGenerating] = useState<boolean>(false);
   
-  // 점수 및 기록
-  const [myScore, setMyScore] = useState<number>(0);
-  const [prevScore, setPrevScore] = useState<number>(0);
-  const [acquiredScore, setAcquiredScore] = useState<number>(0);
+  // 랭킹 & 최고 기록 (로컬 저장소 백업용)
   const [players, setPlayers] = useState<Player[]>([]);
-  const [bestTimes, setBestTimes] = useState<BestTimes>({ '하': null, '중': null, '상': null });
+  const [bestTimes, setBestTimes] = useState<Record<string, number | null>>({ '하': null, '중': null, '상': null });
   const [rank, setRank] = useState<number>(1);
   const [isNewRecord, setIsNewRecord] = useState<boolean>(false);
   
-  // 타이머
+  // 타이머 및 경고 알림
   const [time, setTime] = useState<number>(0);
   const [timerActive, setTimerActive] = useState<boolean>(false);
-  
-  // 경고 메시지 토스트
   const [warningMessage, setWarningMessage] = useState<string | null>(null);
   const [warningTimeout, setWarningTimeout] = useState<NodeJS.Timeout | null>(null);
 
-  // 클리어 연출용 (줌인 & 반짝임)
+  // 클리어 연출
   const [clearedAnimation, setClearedAnimation] = useState<boolean>(false);
-  
-  // 폭죽 파티클 (클리어 화면용)
   const [particles, setParticles] = useState<{ id: number; emoji: string; left: string; delay: string; duration: string }[]>([]);
 
-  // 드래그 상태 관리
+  // 드래그앤드롭 상태
   const [draggedIdx, setDraggedIdx] = useState<number | null>(null);
   const [dragOffset, setDragOffset] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
   const [dragPos, setDragPos] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
-  
-  // 미리보기(Preview) 타겟 격자 좌표
   const [previewCell, setPreviewCell] = useState<{ r: number; c: number } | null>(null);
+
+  // UI 헤더 프로필 팝오버 상태
+  const [showProfilePopover, setShowProfilePopover] = useState(false);
 
   // DOM Refs
   const gridRef = useRef<HTMLDivElement>(null);
   const timerRef = useRef<NodeJS.Timeout | null>(null);
 
   // ==========================================
-  // 3. Initial Load & LocalStorage Sync
+  // 3. Initial Load & Storage Sync
   // ==========================================
   useEffect(() => {
-    // 1. 플레이어 점수 로드
+    // 플레이어 랭킹 로드
     const storedPlayers = localStorage.getItem('block_puzzle_players');
-    let loadedPlayers = DEFAULT_PLAYERS;
     if (storedPlayers) {
       try {
-        loadedPlayers = JSON.parse(storedPlayers);
+        setPlayers(JSON.parse(storedPlayers));
       } catch (e) {
         console.error(e);
       }
     } else {
       localStorage.setItem('block_puzzle_players', JSON.stringify(DEFAULT_PLAYERS));
-    }
-    setPlayers(loadedPlayers);
-
-    // 2. 내 점수 로드
-    const storedMyScore = localStorage.getItem('block_puzzle_myScore');
-    let loadedMyScore = 0;
-    if (storedMyScore) {
-      loadedMyScore = parseInt(storedMyScore, 10);
-      setMyScore(loadedMyScore);
-    } else {
-      localStorage.setItem('block_puzzle_myScore', '0');
+      setPlayers(DEFAULT_PLAYERS);
     }
 
-    // 3. 최고 기록 로드
+    // 최고 기록 로드
     const storedBestTimes = localStorage.getItem('block_puzzle_bestTimes');
     if (storedBestTimes) {
       try {
@@ -230,23 +210,23 @@ export default function BlockPuzzleGame() {
         console.error(e);
       }
     } else {
-      const initialBestTimes: BestTimes = { '하': null, '중': null, '상': null };
-      localStorage.setItem('block_puzzle_bestTimes', JSON.stringify(initialBestTimes));
+      const initial = { '하': null, '중': null, '상': null };
+      localStorage.setItem('block_puzzle_bestTimes', JSON.stringify(initial));
     }
-
-    // 내 등수 계산
-    const currentRank = loadedPlayers.filter(p => p.score > loadedMyScore).length + 1;
-    setRank(currentRank);
   }, []);
 
-  // 내 점수나 플레이어 목록이 변할 때 등수 갱신
+  // 점수와 플레이어 랭킹 변화에 따른 내 등수 계산
   useEffect(() => {
-    const currentRank = players.filter(p => p.score > myScore).length + 1;
+    const sorted = [...players].sort((a, b) => b.score - a.score);
+    const myName = user ? (user.email?.split('@')[0] || '나(Me)') : (guestId || 'guest');
+    
+    // 내 등수 산출: 나보다 높은 사람의 수 + 1
+    const currentRank = sorted.filter(p => p.score > userScore).length + 1;
     setRank(currentRank);
-  }, [myScore, players]);
+  }, [userScore, players, user, guestId]);
 
   // ==========================================
-  // 4. Timer Handling
+  // 4. Timer Hooks
   // ==========================================
   useEffect(() => {
     if (timerActive) {
@@ -262,10 +242,9 @@ export default function BlockPuzzleGame() {
   }, [timerActive]);
 
   // ==========================================
-  // 5. Game Core Logic Functions
+  // 5. Game Core Logic & Gemini AI Integration
   // ==========================================
   
-  // 경고 메시지 표시
   const triggerWarning = (msg: string) => {
     if (warningTimeout) clearTimeout(warningTimeout);
     setWarningMessage(msg);
@@ -275,24 +254,8 @@ export default function BlockPuzzleGame() {
     setWarningTimeout(to);
   };
 
-  // 랜덤 블록 생성
-  const generateRandomBlock = (): Block => {
-    const templateIdx = Math.floor(Math.random() * BLOCK_TEMPLATES.length);
-    const template = BLOCK_TEMPLATES[templateIdx];
-    const shape = template.shape;
-    const height = shape.length;
-    const width = shape[0].length;
-    return {
-      id: Math.random().toString(36).substr(2, 9),
-      shape,
-      color: template.color,
-      width,
-      height
-    };
-  };
-
-  // 게임 시작 처리 (난이도 입력)
-  const startGame = (diff: DifficultyType) => {
+  // 게임 시작 (난이도 선택 시 호출)
+  const startGame = async (diff: DifficultyType) => {
     setDifficulty(diff);
     let size = 5;
     if (diff === '중') size = 7;
@@ -303,39 +266,110 @@ export default function BlockPuzzleGame() {
     const newGrid: (string | null)[][] = Array(size).fill(null).map(() => Array(size).fill(null));
     setGrid(newGrid);
 
-    // 랜덤으로 그림 하나 선택 (사과, 꽃, 케이크)
+    // 그림 랜덤 선택
     const shapes: ('사과' | '꽃' | '케이크')[] = ['사과', '꽃', '케이크'];
     const randomShape = shapes[Math.floor(Math.random() * shapes.length)];
     setTargetShapeName(randomShape);
     const pattern = PATTERNS[diff][randomShape];
     setTargetPattern(pattern);
 
-    // 3개 블록 풀 생성
-    const newPool = [generateRandomBlock(), generateRandomBlock(), generateRandomBlock()];
-    setBlockPool(newPool);
-
-    // 변수 초기화
-    setTime(0);
-    setTimerActive(true);
-    setClearedAnimation(false);
+    // 모달을 닫고 AI 생성 모드 진입
     setShowDiffModal(false);
+    setAiGenerating(true);
     setScreen('playing');
+
+    try {
+      // 1. Gemini AI 블록 생성 API 호출
+      const res = await fetch('/api/generate-blocks', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          difficulty: diff,
+          gridSize: size,
+          targetShapeName: randomShape,
+          targetPattern: pattern
+        })
+      });
+
+      if (!res.ok) {
+        throw new Error('Gemini API 호출 실패');
+      }
+
+      const data = await res.json();
+      const generated: Omit<Block, 'id' | 'width' | 'height'>[] = data.blocks;
+
+      // 2. 받아온 블록 리스트를 큐에 보관
+      setGeminiBlockQueue(generated);
+
+      // 3. 큐에서 최초 3개 블록을 꺼내 풀(Pool) 구성
+      const initialPool: (Block | null)[] = [];
+      const blocksToTake = generated.slice(0, 3);
+      const remainingQueue = generated.slice(3);
+
+      blocksToTake.forEach((b) => {
+        initialPool.push({
+          id: Math.random().toString(36).substr(2, 9),
+          shape: b.shape,
+          color: b.color,
+          width: b.shape[0].length,
+          height: b.shape.length
+        });
+      });
+
+      // 3개가 안 채워졌다면 null로 채움
+      while (initialPool.length < 3) {
+        initialPool.push(null);
+      }
+
+      setBlockPool(initialPool);
+      setGeminiBlockQueue(remainingQueue);
+
+    } catch (err) {
+      console.error('Gemini 블록 구성 에러:', err);
+      triggerWarning('AI 블록 생성에 실패하여 로컬 기본 블록으로 시작합니다.');
+      
+      // Fallback: Gemini 실패 시 기본 블록 템플릿 무한 모드로 세팅
+      const fallbackTemplates = [
+        { shape: [[1]], color: 'from-pink-500 to-rose-500' },
+        { shape: [[1, 1]], color: 'from-amber-400 to-orange-500' },
+        { shape: [[1], [1]], color: 'from-orange-400 to-red-500' },
+        { shape: [[1, 1, 1]], color: 'from-emerald-400 to-teal-500' },
+        { shape: [[1], [1], [1]], color: 'from-teal-400 to-cyan-500' },
+        { shape: [[1, 1], [1, 1]], color: 'from-blue-500 to-indigo-600' }
+      ];
+
+      const initialPool = Array(3).fill(null).map(() => {
+        const t = fallbackTemplates[Math.floor(Math.random() * fallbackTemplates.length)];
+        return {
+          id: Math.random().toString(36).substr(2, 9),
+          shape: t.shape,
+          color: t.color,
+          width: t.shape[0].length,
+          height: t.shape.length
+        };
+      });
+      setBlockPool(initialPool);
+      setGeminiBlockQueue([]); // 큐는 없음
+    } finally {
+      setAiGenerating(false);
+      setTime(0);
+      setTimerActive(true);
+      setClearedAnimation(false);
+    }
   };
 
-  // 게임 다시하기 (같은 난이도 재시작)
   const restartGame = () => {
     if (difficulty) {
       startGame(difficulty);
     }
   };
 
-  // 그만하기 (홈 화면으로)
   const quitGame = () => {
     setTimerActive(false);
     setScreen('home');
   };
 
-  // 남은 채워야 할 타겟 칸 개수 계산
+  // 남은 채워야 할 격자 칸 개수 구하기
   const getRemainingTargetCellsCount = () => {
     if (!targetPattern || targetPattern.length === 0) return 0;
     let count = 0;
@@ -349,7 +383,14 @@ export default function BlockPuzzleGame() {
     return count;
   };
 
-  // 격자판 위의 특정 셀에 블록이 들어갈 수 있는지 체크
+  // 남은 블록 개수 (현재 풀에 있는 유효 블록 수 + 대기 큐의 블록 수)
+  const getRemainingBlocksTotalCount = () => {
+    const poolCount = blockPool.filter(b => b !== null).length;
+    const queueCount = geminiBlockQueue.length;
+    return poolCount + queueCount;
+  };
+
+  // 배치 가능 체크
   const canPlaceBlock = (blockShape: number[][], startRow: number, startCol: number): boolean => {
     const bh = blockShape.length;
     const bw = blockShape[0].length;
@@ -360,12 +401,10 @@ export default function BlockPuzzleGame() {
           const targetRow = startRow + r;
           const targetCol = startCol + c;
 
-          // 격자 범위를 벗어나는 경우
           if (targetRow < 0 || targetRow >= gridSize || targetCol < 0 || targetCol >= gridSize) {
             return false;
           }
 
-          // 이미 블록이 채워져 있는 경우
           if (grid[targetRow][targetCol] !== null) {
             return false;
           }
@@ -375,7 +414,7 @@ export default function BlockPuzzleGame() {
     return true;
   };
 
-  // 블록을 배치하기
+  // 블록 배치
   const placeBlock = (blockIdx: number, startRow: number, startCol: number) => {
     const block = blockPool[blockIdx];
     if (!block) return;
@@ -385,7 +424,7 @@ export default function BlockPuzzleGame() {
       return;
     }
 
-    // 그리드 업데이트
+    // 그리드에 색 채우기
     const newGrid = grid.map(row => [...row]);
     const bh = block.shape.length;
     const bw = block.shape[0].length;
@@ -399,74 +438,83 @@ export default function BlockPuzzleGame() {
     }
     setGrid(newGrid);
 
-    // 사용한 블록 제거 및 새 블록 자동 생성
+    // 사용한 블록을 큐에서 1개 공급받아 채워 넣음
     const newPool = [...blockPool];
-    newPool[blockIdx] = generateRandomBlock();
+    if (geminiBlockQueue.length > 0) {
+      const nextBlock = geminiBlockQueue[0];
+      const nextQueue = geminiBlockQueue.slice(1);
+      
+      newPool[blockIdx] = {
+        id: Math.random().toString(36).substr(2, 9),
+        shape: nextBlock.shape,
+        color: nextBlock.color,
+        width: nextBlock.shape[0].length,
+        height: nextBlock.shape.length
+      };
+      
+      setGeminiBlockQueue(nextQueue);
+    } else {
+      // 더 이상 큐에 블록이 없으면 해당 슬롯은 null 비움
+      newPool[blockIdx] = null;
+    }
+
     setBlockPool(newPool);
 
-    // 클리어 검사 (배치 완료 후의 격자로 판단)
-    checkGameClear(newGrid);
+    // 클리어 판정 검사
+    checkGameClear(newGrid, newPool);
   };
 
-  // 게임 클리어 체크
-  const checkGameClear = (currentGrid: (string | null)[][]) => {
+  // 클리어 검사
+  const checkGameClear = (currentGrid: (string | null)[][], currentPool: (Block | null)[]) => {
     if (!targetPattern || targetPattern.length === 0) return;
-    
-    let isCleared = true;
+
+    // 1. 타겟 형태가 완벽하게 다 채워졌는지 검사
+    let isPatternFilled = true;
     for (let r = 0; r < gridSize; r++) {
       for (let c = 0; c < gridSize; c++) {
-        // 목표가 true인 칸에 색이 다 칠해졌는지 검사
         if (targetPattern[r]?.[c] && !currentGrid[r]?.[c]) {
-          isCleared = false;
+          isPatternFilled = false;
           break;
         }
       }
-      if (!isCleared) break;
+      if (!isPatternFilled) break;
     }
 
-    if (isCleared) {
+    // 2. 준비된 정답 블록도 모두 소진했는지 검사
+    const poolActiveCount = currentPool.filter(b => b !== null).length;
+    const isQueueEmpty = geminiBlockQueue.length === 0 && poolActiveCount === 0;
+
+    // 만약 정답 블록 큐가 다 떨어졌는데(0개) 격자판을 덜 채웠다면, 더 이상 놓을 수 없는 상태
+    if (geminiBlockQueue.length === 0 && poolActiveCount > 0 && !isPatternFilled) {
+      // 큐는 0개이고 풀만 남았는데, 남은 풀의 블록들을 다 써야만 완성이 되도록 유도
+    }
+
+    // 최종 완벽 클리어 조건: 패턴 다 채움 AND 모든 정답 블록 소진
+    if (isPatternFilled && isQueueEmpty) {
       handleClear(currentGrid);
     }
   };
 
-  // 클리어 연출 및 데이터 저장
-  const handleClear = (finalGrid: (string | null)[][]) => {
+  // 클리어 처리
+  const handleClear = async (finalGrid: (string | null)[][]) => {
     setTimerActive(false);
-    
-    // 획득 점수 결정
+
     let points = 100;
     if (difficulty === '중') points = 250;
     if (difficulty === '상') points = 500;
-    setAcquiredScore(points);
-    setPrevScore(myScore);
-
-    // 1. 점수 저장 & 업데이트
-    const nextScore = myScore + points;
-    setMyScore(nextScore);
-    localStorage.setItem('block_puzzle_myScore', nextScore.toString());
-
-    // 2. players 랭킹 업데이트 ("나"의 점수 갱신 혹은 추가)
-    const storedPlayers = localStorage.getItem('block_puzzle_players');
-    let loadedPlayers: Player[] = storedPlayers ? JSON.parse(storedPlayers) : DEFAULT_PLAYERS;
     
-    // 내 닉네임을 "나"로 정의해서 랭킹에 업데이트
-    const myIndex = loadedPlayers.findIndex(p => p.name === '나(Me)');
-    if (myIndex !== -1) {
-      loadedPlayers[myIndex].score = nextScore;
-    } else {
-      loadedPlayers.push({ name: '나(Me)', score: nextScore });
-    }
-    // 내림차순 정렬
-    loadedPlayers.sort((a, b) => b.score - a.score);
-    setPlayers(loadedPlayers);
-    localStorage.setItem('block_puzzle_players', JSON.stringify(loadedPlayers));
+    const prevScore = userScore;
+    setIsNewRecord(false);
 
-    // 3. 최고 기록 갱신 여부
+    // 1. 점수 및 히스토리 업데이트 (AuthContext 연동)
+    await updateUserScore(points, difficulty || '하', time);
+
+    // 2. 최고 기록 갱신 여부
     const currentDiff = difficulty || '하';
     const currentBest = bestTimes[currentDiff];
     let isNew = false;
     const nextBestTimes = { ...bestTimes };
-    
+
     if (currentBest === null || time < currentBest) {
       nextBestTimes[currentDiff] = time;
       setBestTimes(nextBestTimes);
@@ -475,11 +523,10 @@ export default function BlockPuzzleGame() {
     }
     setIsNewRecord(isNew);
 
-    // 4. 그림의 모든 셀 색칠하기 (클리어 상태 연출)
+    // 3. 목표 영역 황금색으로 반짝이게 칠하기
     const fullyColoredGrid = finalGrid.map((row, rIdx) => 
       row.map((cell, cIdx) => {
         if (targetPattern[rIdx]?.[cIdx]) {
-          // 원래 칠해져 있다면 그 색, 아니면 골드빛 그라데이션
           return cell || 'from-yellow-400 to-amber-500';
         }
         return cell;
@@ -487,10 +534,9 @@ export default function BlockPuzzleGame() {
     );
     setGrid(fullyColoredGrid);
 
-    // 5. 줌인 & 반짝임 애니메이션 활성화 (2초간)
+    // 4. 줌인 & 반짝임 애니메이션 2초 작동
     setClearedAnimation(true);
 
-    // 6. 2초 후 클리어 화면으로 전환
     setTimeout(() => {
       // 폭죽 이모지 파티클 생성
       const emojis = ['🎉', '✨', '🎈', '🎇', '🍰', '🌸', '🍎', '🎁', '💫'];
@@ -508,14 +554,16 @@ export default function BlockPuzzleGame() {
   };
 
   // ==========================================
-  // 6. Drag and Drop Pointer Event Handlers
+  // 6. Pointer Drag System Handlers
   // ==========================================
   const handlePointerDown = (e: React.PointerEvent<HTMLDivElement>, index: number) => {
     e.preventDefault();
+    const block = blockPool[index];
+    if (!block) return;
+
     const blockEl = e.currentTarget;
     const rect = blockEl.getBoundingClientRect();
     
-    // 터치/마우스 다운 지점의 블록 돔 기준 오프셋
     const offsetX = e.clientX - rect.left;
     const offsetY = e.clientY - rect.top;
 
@@ -523,7 +571,6 @@ export default function BlockPuzzleGame() {
     setDragOffset({ x: offsetX, y: offsetY });
     setDragPos({ x: e.clientX, y: e.clientY });
     
-    // Pointer capture 획득
     blockEl.setPointerCapture(e.pointerId);
   };
 
@@ -534,7 +581,6 @@ export default function BlockPuzzleGame() {
     const currentY = e.clientY;
     setDragPos({ x: currentX, y: currentY });
 
-    // 격자판(Grid) 위에 올라와 있는지 실시간 위치 계산
     if (gridRef.current) {
       const gridRect = gridRef.current.getBoundingClientRect();
       
@@ -544,23 +590,17 @@ export default function BlockPuzzleGame() {
         currentY >= gridRect.top &&
         currentY <= gridRect.bottom
       ) {
-        // 드롭될 예상 격자 셀 계산
-        // 드래그 중인 오프셋을 기반으로, 블록의 좌상단(0,0) 영역이 매칭될 격자 셀을 찾음
-        // (실제 블록의 시각적 중심을 타겟팅하기 위해 살짝 미세 조정)
         const cellWidth = gridRect.width / gridSize;
         const cellHeight = gridRect.height / gridSize;
 
-        // 드래그하는 포인트에서 오프셋만큼 뺀 값(블록 좌상단)을 기준으로 격자 상 위치 계산
         const relativeX = currentX - dragOffset.x - gridRect.left;
         const relativeY = currentY - dragOffset.y - gridRect.top;
 
-        // 반올림/버림 처리하여 셀 행, 열 계산
         const col = Math.round(relativeX / cellWidth);
         const row = Math.round(relativeY / cellHeight);
 
         const block = blockPool[index];
         if (block) {
-          // 격자 내에 블록이 걸쳐질 수 있는지 확인
           if (row >= 0 && row + block.height <= gridSize && col >= 0 && col + block.width <= gridSize) {
             setPreviewCell({ r: row, c: col });
           } else {
@@ -576,7 +616,6 @@ export default function BlockPuzzleGame() {
   const handlePointerUp = (e: React.PointerEvent<HTMLDivElement>, index: number) => {
     if (draggedIdx !== index) return;
     
-    // Capture 해제
     e.currentTarget.releasePointerCapture(e.pointerId);
 
     const finalX = e.clientX;
@@ -603,7 +642,6 @@ export default function BlockPuzzleGame() {
         const block = blockPool[index];
         if (block) {
           if (row >= 0 && row + block.height <= gridSize && col >= 0 && col + block.width <= gridSize) {
-            // 배치 가능한지 검사
             if (canPlaceBlock(block.shape, row, col)) {
               placeBlock(index, row, col);
             } else {
@@ -616,16 +654,10 @@ export default function BlockPuzzleGame() {
       }
     }
 
-    // 드래그 상태 리셋
     setDraggedIdx(null);
     setPreviewCell(null);
   };
 
-  // ==========================================
-  // 7. Visual Render Helper Functions
-  // ==========================================
-  
-  // 포맷팅된 시간 문자열 (MM:SS)
   const formatTime = (secs: number) => {
     const m = Math.floor(secs / 60).toString().padStart(2, '0');
     const s = (secs % 60).toString().padStart(2, '0');
@@ -633,32 +665,90 @@ export default function BlockPuzzleGame() {
   };
 
   // ==========================================
-  // 8. Screen Rendering
+  // 7. Render Pages
   // ==========================================
   
   // ------------------------------------------
-  // HOME SCREEN
+  // HOME SCREEN (With Top Header Profile Link)
   // ------------------------------------------
   const renderHomeScreen = () => {
-    // 랭킹 상위 3인 추출
     const top3 = [...players].sort((a, b) => b.score - a.score).slice(0, 3);
     
     return (
-      <div className="flex flex-col items-center justify-center min-h-screen py-10 px-4 animate-pop-in">
-        {/* 내 정보 영역 */}
-        <div className="absolute top-6 left-6 flex flex-col gap-1 p-3 rounded-xl glass-panel shadow-lg border border-white/10">
-          <div className="text-xs text-zinc-400 font-semibold uppercase tracking-wider">나의 기록</div>
-          <div className="text-sm text-zinc-200">내 점수: <span className="font-extrabold text-indigo-400">{myScore}점</span></div>
-          <div className="text-sm text-zinc-200">내 등수: <span className="font-extrabold text-amber-400">{rank}위</span></div>
+      <div className="flex flex-col items-center justify-center min-h-screen py-10 px-4 animate-pop-in relative">
+        
+        {/* 상단 헤더 프로필 영역 */}
+        <div className="absolute top-6 right-6 z-30">
+          {user ? (
+            <div 
+              className="relative"
+              onMouseEnter={() => setShowProfilePopover(true)}
+              onMouseLeave={() => setShowProfilePopover(false)}
+            >
+              {/* 사용자 프로필 사진 (Google Avatar) */}
+              <button className="w-10 h-10 rounded-full border border-white/20 overflow-hidden cursor-pointer shadow-lg hover:border-indigo-400 transition-all flex items-center justify-center bg-zinc-800">
+                {user.user_metadata?.avatar_url ? (
+                  <img 
+                    src={user.user_metadata.avatar_url} 
+                    alt="avatar" 
+                    className="w-full h-full object-cover" 
+                  />
+                ) : (
+                  <span className="text-zinc-200 font-bold uppercase">{user.email?.[0]}</span>
+                )}
+              </button>
+              
+              {/* 호버 팝오버 Sign out */}
+              {showProfilePopover && (
+                <div className="absolute right-0 mt-1 w-32 bg-zinc-900 border border-zinc-850 p-2 rounded-xl shadow-xl animate-fade-in text-center flex flex-col items-center gap-1.5">
+                  <span className="text-[10px] text-zinc-400 truncate max-w-full font-bold">
+                    {user.email?.split('@')[0]}
+                  </span>
+                  <button
+                    onClick={() => signOut()}
+                    className="w-full py-1.5 text-xs font-extrabold bg-rose-950 hover:bg-rose-900 text-rose-300 rounded-lg cursor-pointer transition-colors border border-rose-900/40"
+                  >
+                    Sign out
+                  </button>
+                </div>
+              )}
+            </div>
+          ) : (
+            // 비로그인 상태 (게스트) 로그인 링크
+            <Link 
+              href="/auth"
+              className="px-4 py-2 bg-indigo-950 hover:bg-indigo-900 border border-indigo-900 text-indigo-300 hover:text-indigo-100 text-xs font-extrabold rounded-xl transition-all shadow-md"
+            >
+              로그인 🔑
+            </Link>
+          )}
         </div>
 
+        {/* 내 기록 정보 */}
+        <div className="absolute top-6 left-6 flex flex-col gap-1 p-3 rounded-xl glass-panel shadow-lg border border-white/10">
+          <div className="text-[10px] text-zinc-400 font-bold uppercase tracking-wider flex items-center gap-1">
+            <span>나의 기록</span>
+            {isGuest ? (
+              <span className="bg-zinc-800 text-[9px] text-zinc-400 px-1.5 py-0.5 rounded-full border border-zinc-700 font-normal">게스트</span>
+            ) : (
+              <span className="bg-indigo-950 text-[9px] text-indigo-300 px-1.5 py-0.5 rounded-full border border-indigo-900/50 font-semibold">인증됨</span>
+            )}
+          </div>
+          <div className="text-sm text-zinc-200">
+            내 점수: <span className="font-extrabold text-indigo-400">{userScore}점</span>
+          </div>
+          <div className="text-sm text-zinc-200">
+            내 등수: <span className="font-extrabold text-amber-400">{rank}위</span>
+          </div>
+        </div>
+
+        {/* 랭킹 판 */}
         <div className="w-full max-w-md flex flex-col items-center gap-8 bg-zinc-900/50 p-8 rounded-3xl border border-zinc-800 shadow-2xl backdrop-blur-md">
-          {/* 타이틀 로고 */}
           <div className="text-center">
             <h1 className="text-4xl font-black tracking-tight bg-gradient-to-r from-indigo-400 via-purple-400 to-pink-500 bg-clip-text text-transparent drop-shadow-sm">
               BLOCK PUZZLE
             </h1>
-            <p className="text-sm text-zinc-400 mt-2 font-medium">그림 패턴을 완성하는 이색 블록 퍼즐!</p>
+            <p className="text-xs text-zinc-400 mt-2 font-medium">Gemini AI가 제공하는 정답 블록으로 형태를 다 맞춰보세요!</p>
           </div>
 
           {/* TOP 3 플레이어 */}
@@ -682,7 +772,7 @@ export default function BlockPuzzleGame() {
                     return (
                       <tr key={idx} className="border-b border-zinc-900/50 text-sm text-zinc-300 hover:bg-zinc-800/20 transition-colors">
                         <td className={`py-3 px-4 ${rankColor}`}>{rankMedal} {idx + 1}</td>
-                        <td className="py-3 px-4 font-medium">{player.name}</td>
+                        <td className="py-3 px-4 font-medium truncate max-w-[120px]">{player.name}</td>
                         <td className="py-3 px-4 font-bold text-indigo-300">{player.score}점</td>
                       </tr>
                     );
@@ -697,7 +787,6 @@ export default function BlockPuzzleGame() {
             </div>
           </div>
 
-          {/* 게임 시작 버튼 */}
           <button
             onClick={() => setShowDiffModal(true)}
             className="w-full py-4 bg-gradient-to-r from-indigo-500 via-purple-500 to-pink-500 text-white font-extrabold text-xl rounded-2xl shadow-lg hover:shadow-indigo-500/20 hover:scale-[1.03] active:scale-[0.98] transition-all cursor-pointer"
@@ -708,9 +797,8 @@ export default function BlockPuzzleGame() {
 
         {/* 난이도 선택 모달 */}
         {showDiffModal && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-md animate-fade-in">
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-md">
             <div className="relative w-full max-w-sm mx-4 bg-zinc-900 border border-zinc-800 rounded-3xl p-6 shadow-2xl animate-pop-in">
-              {/* 닫기 버튼 */}
               <button 
                 onClick={() => setShowDiffModal(false)}
                 className="absolute top-4 right-4 text-zinc-400 hover:text-white text-xl font-bold cursor-pointer w-8 h-8 flex items-center justify-center rounded-full bg-zinc-800/50 hover:bg-zinc-800 transition-colors"
@@ -723,7 +811,6 @@ export default function BlockPuzzleGame() {
               </h2>
 
               <div className="flex flex-col gap-4">
-                {/* 하 난이도 */}
                 <button
                   onClick={() => startGame('하')}
                   className="flex flex-col items-center justify-center p-4 bg-zinc-800/40 hover:bg-emerald-950/20 border border-zinc-800 hover:border-emerald-500/50 rounded-2xl transition-all group cursor-pointer text-center"
@@ -735,7 +822,6 @@ export default function BlockPuzzleGame() {
                   </span>
                 </button>
 
-                {/* 중 난이도 */}
                 <button
                   onClick={() => startGame('중')}
                   className="flex flex-col items-center justify-center p-4 bg-zinc-800/40 hover:bg-amber-950/20 border border-zinc-800 hover:border-amber-500/50 rounded-2xl transition-all group cursor-pointer text-center"
@@ -747,7 +833,6 @@ export default function BlockPuzzleGame() {
                   </span>
                 </button>
 
-                {/* 상 난이도 */}
                 <button
                   onClick={() => startGame('상')}
                   className="flex flex-col items-center justify-center p-4 bg-zinc-800/40 hover:bg-rose-950/20 border border-zinc-800 hover:border-rose-500/50 rounded-2xl transition-all group cursor-pointer text-center"
@@ -762,6 +847,36 @@ export default function BlockPuzzleGame() {
             </div>
           </div>
         )}
+
+        {/* 게스트 스코어 마이그레이션 팝업 모달 */}
+        {pendingMigrationScore !== null && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-md">
+            <div className="relative w-full max-w-sm mx-4 bg-zinc-900 border border-zinc-800 rounded-3xl p-6 shadow-2xl animate-pop-in text-center flex flex-col gap-5">
+              <span className="text-4xl animate-bounce">⚡</span>
+              <h3 className="text-xl font-black text-indigo-400">게스트 점수 이전 알림</h3>
+              <p className="text-sm text-zinc-300 leading-6">
+                인증 로그인 이전에 게스트 모드로 플레이하여 누적된 점수{' '}
+                <span className="font-extrabold text-indigo-300">{pendingMigrationScore}점</span>이 감지되었습니다. 
+                이 점수를 현재 가입된 계정으로 이전하시겠습니까?
+              </p>
+              <div className="flex gap-3 mt-2">
+                <button
+                  onClick={() => migrateGuestScore(false)}
+                  className="flex-1 py-3 bg-zinc-850 hover:bg-zinc-800 text-zinc-400 hover:text-zinc-200 font-bold text-xs rounded-xl cursor-pointer transition-colors border border-zinc-800"
+                >
+                  아니오 (삭제)
+                </button>
+                <button
+                  onClick={() => migrateGuestScore(true)}
+                  className="flex-1 py-3 bg-gradient-to-r from-indigo-500 to-purple-600 text-white font-extrabold text-xs rounded-xl shadow-md cursor-pointer hover:scale-[1.02] active:scale-[0.98] transition-all"
+                >
+                  예 (합산 이전)
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
       </div>
     );
   };
@@ -770,31 +885,44 @@ export default function BlockPuzzleGame() {
   // PLAYING SCREEN
   // ------------------------------------------
   const renderPlayingScreen = () => {
+    // 1. AI 블록 설계 중 로딩 뷰
+    if (aiGenerating) {
+      return (
+        <div className="min-h-screen flex flex-col items-center justify-center bg-zinc-950 text-zinc-100 gap-4">
+          <div className="w-12 h-12 border-4 border-indigo-500 border-t-transparent rounded-full animate-spin"></div>
+          <div className="text-center flex flex-col gap-1">
+            <p className="text-base font-black text-indigo-400">Gemini AI가 블록을 조각하는 중...</p>
+            <p className="text-xs text-zinc-500">목표 틀을 완전히 채울 수 있는 최적의 정답 블록 세트를 생성하고 있습니다.</p>
+          </div>
+        </div>
+      );
+    }
+
     const remainingTargetCells = getRemainingTargetCellsCount();
+    const remainingBlocksTotal = getRemainingBlocksTotalCount();
 
     return (
       <div className="flex flex-col items-center justify-between min-h-screen py-6 px-4 select-none relative overflow-hidden">
         
-        {/* 상단바: 남은 셀(블록) 표시, 목표 명칭 */}
+        {/* 상단바 */}
         <div className="w-full max-w-lg flex items-center justify-between bg-zinc-900/60 backdrop-blur-md px-6 py-4 rounded-2xl border border-zinc-800 shadow-lg mb-4">
           <div className="flex flex-col">
-            <span className="text-[11px] text-zinc-400 font-bold uppercase tracking-wider">목표 그림</span>
-            <span className="text-lg font-black text-indigo-400 flex items-center gap-1.5">
+            <span className="text-[10px] text-zinc-400 font-bold uppercase tracking-wider">목표 그림</span>
+            <span className="text-base font-black text-indigo-400 flex items-center gap-1.5">
               {targetShapeName === '사과' ? '🍎' : targetShapeName === '꽃' ? '🌸' : '🍰'} {targetShapeName}
             </span>
           </div>
           <div className="flex flex-col items-end">
-            <span className="text-[11px] text-zinc-400 font-bold uppercase tracking-wider">남은 채울 칸</span>
-            <span className="text-lg font-black text-rose-400 animate-pulse">
-              남은 블록: {remainingTargetCells}개
+            <span className="text-[10px] text-zinc-400 font-bold uppercase tracking-wider">남은 채울 칸 / 남은 정답 블록</span>
+            <span className="text-sm font-black text-rose-400 animate-pulse mt-0.5">
+              빈 칸: {remainingTargetCells}개 • 남은 블록: {remainingBlocksTotal}개
             </span>
           </div>
         </div>
 
-        {/* 메인 격자판 & 목표 미니맵 가이드 */}
+        {/* 격자판 & 가이드 */}
         <div className="flex flex-col items-center justify-center flex-1 my-2">
           
-          {/* 가이드 미니맵 */}
           <div className="mb-4 flex flex-col items-center bg-zinc-950/80 p-2.5 rounded-xl border border-zinc-800 shadow-inner">
             <span className="text-[10px] text-zinc-400 font-semibold mb-1">완성해야 할 목표 형태 가이드</span>
             <div 
@@ -805,7 +933,7 @@ export default function BlockPuzzleGame() {
                 row.map((val, c) => (
                   <div 
                     key={`${r}-${c}`}
-                    className={`w-3.5 h-3.5 rounded-[2px] transition-colors ${
+                    className={`w-3 h-3 rounded-[2px] transition-colors ${
                       val 
                         ? (targetShapeName === '사과' ? 'bg-red-500/80' : targetShapeName === '꽃' ? 'bg-pink-400/80' : 'bg-yellow-400/80') 
                         : 'bg-zinc-850'
@@ -816,14 +944,12 @@ export default function BlockPuzzleGame() {
             </div>
           </div>
 
-          {/* 메인 격자판 (Canvas 혹은 Div 기반) */}
           <div 
             ref={gridRef}
             className={`relative p-3 bg-zinc-950 rounded-3xl border border-zinc-800 shadow-2xl transition-all duration-500 overflow-hidden ${
               clearedAnimation ? 'animate-pulse-gold scale-105 z-10' : ''
             }`}
           >
-            {/* 반짝임 애니메이션 레이어 (클리어 시 노출) */}
             {clearedAnimation && <div className="absolute inset-0 bg-shine pointer-events-none z-10" />}
 
             <div 
@@ -839,17 +965,18 @@ export default function BlockPuzzleGame() {
                   const isTarget = targetPattern[rIdx]?.[cIdx];
                   const hasColor = cellColor !== null;
                   
-                  // 드래그 미리보기 체크 (previewCell 좌표 범위 내에 이 셀이 들어가고, 블록 형상이 1인 경우)
                   let isPreviewActive = false;
                   let previewColor = '';
                   if (previewCell && draggedIdx !== null) {
                     const block = blockPool[draggedIdx];
-                    const pr = rIdx - previewCell.r;
-                    const pc = cIdx - previewCell.c;
-                    if (pr >= 0 && pr < block.shape.length && pc >= 0 && pc < block.shape[0].length) {
-                      if (block.shape[pr][pc] === 1) {
-                        isPreviewActive = true;
-                        previewColor = block.color;
+                    if (block) {
+                      const pr = rIdx - previewCell.r;
+                      const pc = cIdx - previewCell.c;
+                      if (pr >= 0 && pr < block.shape.length && pc >= 0 && pc < block.shape[0].length) {
+                        if (block.shape[pr][pc] === 1) {
+                          isPreviewActive = true;
+                          previewColor = block.color;
+                        }
                       }
                     }
                   }
@@ -867,7 +994,6 @@ export default function BlockPuzzleGame() {
                               : 'bg-zinc-900 border border-zinc-950 cursor-pointer'
                       }`}
                     >
-                      {/* 목표 영역이지만 아직 칠해지지 않은 곳에는 옅은 아이콘을 띄워 완성 힌트를 줌 */}
                       {isTarget && !hasColor && !isPreviewActive && (
                         <div className="absolute w-1.5 h-1.5 rounded-full bg-zinc-600/50" />
                       )}
@@ -879,22 +1005,34 @@ export default function BlockPuzzleGame() {
           </div>
         </div>
 
-        {/* 하단 경고 메시지 토스트 */}
+        {/* 경고 알림 */}
         {warningMessage && (
-          <div className="absolute bottom-40 bg-red-500/95 text-white font-extrabold text-sm px-5 py-2.5 rounded-full shadow-lg border border-red-400/30 animate-bounce z-40 backdrop-blur-sm">
+          <div className="absolute bottom-40 bg-red-500/95 text-white font-extrabold text-xs px-5 py-2.5 rounded-full shadow-lg border border-red-400/30 animate-bounce z-40 backdrop-blur-sm">
             ⚠️ {warningMessage}
           </div>
         )}
 
-        {/* 제시되는 3개 블록 풀 */}
+        {/* 제시되는 블록 (3개 풀) */}
         <div className="w-full max-w-lg bg-zinc-900/50 border border-zinc-800 p-4 rounded-3xl shadow-inner mb-6">
-          <div className="text-center text-xs text-zinc-400 font-bold mb-3">
-            👇 블록을 길게 누른 상태로 그리드판에 드래그하여 배치하세요!
+          <div className="text-center text-[10px] text-zinc-400 font-bold mb-3 uppercase tracking-wider">
+            👉 블록을 클릭한 상태로 격자판에 드래그 앤 드롭 하세요! (마지막에 남은 블록이 0개여야 완료됩니다)
           </div>
           <div className="flex justify-around items-center gap-4">
             {blockPool.map((block, idx) => {
+              if (!block) {
+                return (
+                  <div 
+                    key={`empty-${idx}`}
+                    className="flex items-center justify-center p-3 rounded-2xl bg-zinc-950/20 border border-zinc-900/50 border-dashed"
+                    style={{ width: '100px', height: '100px' }}
+                  >
+                    <span className="text-[10px] text-zinc-600 font-extrabold uppercase">소진됨</span>
+                  </div>
+                );
+              }
+
               const isDragged = draggedIdx === idx;
-              
+
               return (
                 <div 
                   key={block.id}
@@ -905,11 +1043,10 @@ export default function BlockPuzzleGame() {
                     isDragged ? 'opacity-30 bg-zinc-800/30' : 'bg-zinc-950/80 hover:bg-zinc-950 border border-zinc-800 hover:border-zinc-700/60 shadow-lg'
                   }`}
                   style={{
-                    width: '110px',
-                    height: '110px',
+                    width: '100px',
+                    height: '100px',
                   }}
                 >
-                  {/* 블록 형상 */}
                   <div 
                     className="grid gap-[2px]"
                     style={{
@@ -920,7 +1057,7 @@ export default function BlockPuzzleGame() {
                       row.map((cell, c) => (
                         <div 
                           key={`${r}-${c}`}
-                          className={`w-5 h-5 rounded-[4px] ${
+                          className={`w-4 h-4 rounded-[3px] ${
                             cell === 1 
                               ? `bg-gradient-to-br ${block.color} border border-white/10` 
                               : 'bg-transparent'
@@ -935,30 +1072,30 @@ export default function BlockPuzzleGame() {
           </div>
         </div>
 
-        {/* 실시간 드래그 중인 블록 렌더링 */}
-        {draggedIdx !== null && (
+        {/* 드래그 렌더링 */}
+        {draggedIdx !== null && blockPool[draggedIdx] && (
           <div 
-            className="fixed pointer-events-none z-50 transform -translate-x-[25px] -translate-y-[25px] drop-shadow-2xl"
+            className="fixed pointer-events-none z-50 transform -translate-x-[20px] -translate-y-[20px] drop-shadow-2xl"
             style={{
               left: `${dragPos.x - dragOffset.x}px`,
               top: `${dragPos.y - dragOffset.y}px`,
-              width: `${blockPool[draggedIdx].width * 42}px`,
-              height: `${blockPool[draggedIdx].height * 42}px`
+              width: `${blockPool[draggedIdx]!.width * 38}px`,
+              height: `${blockPool[draggedIdx]!.height * 38}px`
             }}
           >
             <div 
               className="grid gap-1 scale-[1.05]"
               style={{
-                gridTemplateColumns: `repeat(${blockPool[draggedIdx].shape[0].length}, minmax(0, 1fr))`
+                gridTemplateColumns: `repeat(${blockPool[draggedIdx]!.shape[0].length}, minmax(0, 1fr))`
               }}
             >
-              {blockPool[draggedIdx].shape.map((row, r) => 
+              {blockPool[draggedIdx]!.shape.map((row, r) => 
                 row.map((cell, c) => (
                   <div 
                     key={`${r}-${c}`}
-                    className={`w-9 h-9 rounded-lg transition-all ${
+                    className={`w-8 h-8 rounded-lg transition-all ${
                       cell === 1 
-                        ? `bg-gradient-to-br ${blockPool[draggedIdx].color} border border-white/20 opacity-90` 
+                        ? `bg-gradient-to-br ${blockPool[draggedIdx]!.color} border border-white/20 opacity-90` 
                         : 'bg-transparent'
                     }`}
                   />
@@ -968,21 +1105,19 @@ export default function BlockPuzzleGame() {
           </div>
         )}
 
-        {/* 하단 제어바 (타이머 & 그만하기 / 다시하기) */}
+        {/* 하단바 */}
         <div className="w-full max-w-lg flex items-center justify-between border-t border-zinc-800/80 pt-4">
-          {/* 타이머 */}
           <div className="flex items-center gap-2 bg-zinc-900/60 px-4 py-2 rounded-xl border border-zinc-800 shadow-inner">
-            <span className="text-zinc-400 text-xs font-semibold">⏱️ 플레이 시간</span>
+            <span className="text-zinc-400 text-[10px] font-bold uppercase">⏱️ 플레이 시간</span>
             <span className="text-zinc-200 font-extrabold text-sm tabular-nums">
               {formatTime(time)}
             </span>
           </div>
 
-          {/* 제어 버튼 */}
           <div className="flex gap-2">
             <button
               onClick={restartGame}
-              className="px-4 py-2 bg-zinc-800 hover:bg-zinc-700 text-zinc-200 hover:text-white text-xs font-extrabold rounded-xl transition-all cursor-pointer border border-zinc-700"
+              className="px-4 py-2 bg-zinc-800 hover:bg-zinc-700 text-zinc-200 hover:text-white text-xs font-extrabold rounded-xl transition-all cursor-pointer border border-zinc-750"
             >
               다시하기 🔄
             </button>
@@ -1003,15 +1138,14 @@ export default function BlockPuzzleGame() {
   // CLEAR SCREEN
   // ------------------------------------------
   const renderClearScreen = () => {
-    // 획득 점수 증가 애니메이션용 상태
-    const [animatedScore, setAnimatedScore] = useState<number>(prevScore);
+    const [animatedScore, setAnimatedScore] = useState<number>(userScore - (difficulty === '하' ? 100 : difficulty === '중' ? 250 : 500));
 
     useEffect(() => {
-      let start = prevScore;
-      const end = myScore;
+      let start = userScore - (difficulty === '하' ? 100 : difficulty === '중' ? 250 : 500);
+      const end = userScore;
       if (start === end) return;
 
-      const duration = 1000; // 1초
+      const duration = 1000;
       const stepTime = Math.abs(Math.floor(duration / (end - start)));
       const timer = setInterval(() => {
         start += 1;
@@ -1019,15 +1153,16 @@ export default function BlockPuzzleGame() {
         if (start >= end) {
           clearInterval(timer);
         }
-      }, Math.max(stepTime, 20)); // 너무 빠르면 최소 20ms 보정
+      }, Math.max(stepTime, 20));
 
       return () => clearInterval(timer);
-    }, [prevScore, myScore]);
+    }, [userScore, difficulty]);
+
+    const acquired = difficulty === '하' ? 100 : difficulty === '중' ? 250 : 500;
 
     return (
       <div className="flex flex-col items-center justify-center min-h-screen py-10 px-4 select-none relative overflow-hidden">
         
-        {/* 폭죽 애니메이션 파티클 */}
         {particles.map(p => (
           <div
             key={p.id}
@@ -1044,63 +1179,58 @@ export default function BlockPuzzleGame() {
 
         <div className="w-full max-w-md bg-zinc-900/70 p-8 rounded-3xl border border-zinc-800 shadow-2xl backdrop-blur-md flex flex-col items-center gap-6 animate-pop-in text-center z-10 relative">
           
-          {/* 축하 타이틀 */}
           <div className="flex flex-col items-center gap-2">
             <span className="text-5xl animate-bounce">🏆</span>
             <h1 className="text-4xl font-black text-yellow-400 uppercase tracking-tight drop-shadow-md">
               STAGE CLEAR!
             </h1>
-            <p className="text-zinc-400 text-sm font-semibold">완성된 그림을 성공적으로 맞췄습니다!</p>
+            <p className="text-zinc-400 text-xs font-semibold">Gemini AI 블록 세트를 활용하여 그림을 완벽히 메웠습니다!</p>
           </div>
 
-          {/* 등수 정보 */}
-          <div className="px-5 py-2.5 bg-indigo-950/40 border border-indigo-500/30 rounded-2xl">
-            <span className="text-sm text-zinc-300 font-semibold">현재 등수 : </span>
-            <span className="text-base font-black text-indigo-300">{rank}위</span>
+          <div className="px-5 py-2.5 bg-indigo-950/40 border border-indigo-500/30 rounded-2xl flex items-center gap-1.5">
+            <span className="text-xs text-zinc-400 font-bold uppercase">현재 등수 : </span>
+            <span className="text-sm font-black text-indigo-300">{rank}위</span>
           </div>
 
-          {/* 점수 획득 애니메이션 영역 */}
           <div className="w-full py-6 bg-zinc-950/60 rounded-2xl border border-zinc-800 shadow-inner flex flex-col items-center gap-2">
-            <div className="text-xs text-zinc-400 font-bold uppercase tracking-wider">획득 점수</div>
-            <div className="text-sm text-zinc-300 font-medium flex items-center gap-1.5">
-              이전 점수 <span className="font-extrabold text-zinc-200">{prevScore}점</span> 
+            <div className="text-[10px] text-zinc-400 font-bold uppercase tracking-wider">획득 점수</div>
+            <div className="text-xs text-zinc-300 font-medium flex items-center gap-1.5">
+              이전 점수 <span className="font-extrabold text-zinc-200">{userScore - acquired}점</span> 
               <span className="text-indigo-400 font-black">+</span> 
-              <span className="font-black text-emerald-400">{acquiredScore}점</span>
+              <span className="font-black text-emerald-400">{acquired}점</span>
             </div>
             
             <div className="h-[1px] w-1/2 bg-zinc-800/80 my-2" />
 
-            <div className="text-xs text-zinc-400 font-bold uppercase tracking-wider">누적 점수</div>
+            <div className="text-[10px] text-zinc-400 font-bold uppercase tracking-wider">누적 점수</div>
             <div className="text-3xl font-black text-white bg-gradient-to-r from-yellow-400 via-amber-400 to-orange-500 bg-clip-text text-transparent drop-shadow-sm">
               {animatedScore}점
             </div>
           </div>
 
-          {/* 시간 및 기록 정보 */}
           <div className="w-full flex justify-between items-center bg-zinc-800/20 p-4 rounded-xl border border-zinc-800/50">
             <div className="flex flex-col items-start">
-              <span className="text-xs text-zinc-400 font-semibold">클리어 시간</span>
+              <span className="text-[10px] text-zinc-400 font-bold uppercase">클리어 시간</span>
               <span className="text-sm font-extrabold text-zinc-200 tabular-nums">{formatTime(time)}</span>
             </div>
             
             {isNewRecord && (
-              <div className="bg-gradient-to-r from-amber-500 to-yellow-400 text-zinc-950 font-black text-xs px-3.5 py-1.5 rounded-full shadow-md animate-pulse">
+              <div className="bg-gradient-to-r from-amber-500 to-yellow-400 text-zinc-950 font-black text-[10px] px-3 py-1 rounded-full shadow-md animate-pulse">
                 🔥 신기록!
               </div>
             )}
           </div>
 
-          {/* 하단 이동 버튼 */}
           <div className="w-full flex gap-3 mt-4">
             <button
               onClick={() => setScreen('home')}
-              className="flex-1 py-3.5 bg-zinc-800 hover:bg-zinc-700 text-zinc-200 hover:text-white font-extrabold text-sm rounded-xl transition-all cursor-pointer border border-zinc-750"
+              className="flex-1 py-3.5 bg-zinc-800 hover:bg-zinc-700 text-zinc-200 hover:text-white font-extrabold text-xs rounded-xl transition-all cursor-pointer border border-zinc-750"
             >
               홈으로 🏠
             </button>
             <button
               onClick={restartGame}
-              className="flex-1 py-3.5 bg-gradient-to-r from-indigo-500 to-purple-600 text-white font-extrabold text-sm rounded-xl shadow-md hover:scale-[1.02] active:scale-[0.98] transition-all cursor-pointer"
+              className="flex-1 py-3.5 bg-gradient-to-r from-indigo-500 to-purple-600 text-white font-extrabold text-xs rounded-xl shadow-md hover:scale-[1.02] active:scale-[0.98] transition-all cursor-pointer"
             >
               다시 플레이 🔄
             </button>
@@ -1112,9 +1242,6 @@ export default function BlockPuzzleGame() {
     );
   };
 
-  // ==========================================
-  // 9. Root Render Controller
-  // ==========================================
   switch (screen) {
     case 'playing':
       return renderPlayingScreen();
