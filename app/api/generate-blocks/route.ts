@@ -52,6 +52,8 @@ export async function POST(req: Request) {
       - 1x2 (vertical): [[1], [1]]
       - 3x1 (horizontal): [[1, 1, 1]]
       - 1x3 (vertical): [[1], [1], [1]]
+      - 4x1 (horizontal): [[1, 1, 1, 1]]
+      - 1x4 (vertical): [[1], [1], [1], [1]]
       - 2x2 square: [[1, 1], [1, 1]]
       - L-shape (3 cells): [[1, 0], [1, 1]]
       - T-shape (4 cells): [[0, 1, 0], [1, 1, 1]]
@@ -136,6 +138,10 @@ export async function POST(req: Request) {
               filteredBlocks.push({ shape: [[1]], color: block.color });
             } else if (remaining === 2) {
               filteredBlocks.push({ shape: [[1, 1]], color: block.color });
+            } else if (remaining === 3) {
+              filteredBlocks.push({ shape: [[1, 1, 1]], color: block.color });
+            } else if (remaining === 4) {
+              filteredBlocks.push({ shape: [[1, 1, 1, 1]], color: block.color });
             }
             excess = 0;
           } else {

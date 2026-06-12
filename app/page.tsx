@@ -2,6 +2,7 @@
 
 import React, { useState, useEffect, useRef } from 'react';
 import { useAuth } from '../context/AuthContext';
+import { supabase } from '../lib/supabaseClient';
 import Link from 'next/link';
 
 // ==========================================
@@ -125,13 +126,15 @@ const DEFAULT_PLAYERS: Player[] = [
   { name: '도전가', score: 1000 }
 ];
 
-// 블록 템플릿 정의 (8가지)
+// 블록 템플릿 정의 (10가지)
 const BLOCK_TEMPLATES: { shape: number[][]; color: string }[] = [
   { shape: [[1]], color: 'from-pink-500 to-rose-500' }, // 1x1
   { shape: [[1, 1]], color: 'from-amber-400 to-orange-500' }, // 2x1 가로
   { shape: [[1], [1]], color: 'from-orange-400 to-red-500' }, // 1x2 세로
   { shape: [[1, 1, 1]], color: 'from-emerald-400 to-teal-500' }, // 3x1 가로
   { shape: [[1], [1], [1]], color: 'from-teal-400 to-cyan-500' }, // 1x3 세로
+  { shape: [[1, 1, 1, 1]], color: 'from-cyan-400 to-blue-500' }, // 4x1 가로
+  { shape: [[1], [1], [1], [1]], color: 'from-blue-400 to-indigo-500' }, // 1x4 세로
   { shape: [[1, 1], [1, 1]], color: 'from-blue-500 to-indigo-600' }, // 2x2 사각형
   { shape: [[1, 0], [1, 1]], color: 'from-violet-500 to-purple-600' }, // L자 (3칸)
   { shape: [[0, 1, 0], [1, 1, 1]], color: 'from-fuchsia-500 to-pink-600' } // T자 (4칸)
@@ -200,6 +203,53 @@ export default function BlockPuzzleGame() {
   const gridRef = useRef<HTMLDivElement>(null);
   const timerRef = useRef<NodeJS.Timeout | null>(null);
 
+  // Supabase 실시간 리더보드 동기화 (is_guest = false 대상)
+  // users 테이블은 구글 계정으로 로그인된 정식 회원만 적재되므로, 
+  // users(email) 조인 쿼리 결과 중 users가 존재하는 데이터만 추출하여 랭킹에 표시하면 게스트가 완벽히 제외됩니다.
+  const fetchLeaderboard = async () => {
+    try {
+      const { data, error } = await (supabase as any)
+        .from('user_scores')
+        .select('id, total_score, users(email)')
+        .order('total_score', { ascending: false })
+        .limit(10);
+
+      if (data && !error) {
+        const mapped: Player[] = [];
+        data.forEach((row: any) => {
+          let email = '';
+          if (row.users) {
+            if (Array.isArray(row.users)) {
+              email = row.users[0]?.email || '';
+            } else {
+              email = row.users.email || '';
+            }
+          }
+          // 이메일이 매칭되는 경우만 (즉, 정식 계정 사용자이고 게스트가 아닌 경우) 랭킹 등록
+          if (email) {
+            mapped.push({
+              name: email.split('@')[0] || '익명',
+              score: row.total_score
+            });
+          }
+        });
+        
+        // 획득한 실시간 TOP 3 랭킹 적용
+        if (mapped.length > 0) {
+          setPlayers(mapped);
+          localStorage.setItem('block_puzzle_players', JSON.stringify(mapped));
+        }
+      }
+    } catch (e) {
+      console.error('리더보드 조회 오류:', e);
+    }
+  };
+
+  // 사용자 로그인/아웃 및 점수 획득 시점 리더보드 실시간 동기화
+  useEffect(() => {
+    fetchLeaderboard();
+  }, [user, userScore]);
+
   // ==========================================
   // 3. Initial Load & Storage Sync
   // ==========================================
@@ -260,7 +310,7 @@ export default function BlockPuzzleGame() {
   // 클리어 화면 누적 점수 롤링 애니메이션 처리 이펙트
   useEffect(() => {
     if (screen === 'clear') {
-      const acquired = difficulty === '하' ? 100 : difficulty === '중' ? 250 : 500;
+      const acquired = difficulty === '하' ? 100 : difficulty === '중' ? 250 : 1000;
       let start = userScore - acquired;
       const end = userScore;
       setAnimatedScore(start);
@@ -575,7 +625,7 @@ export default function BlockPuzzleGame() {
 
     let points = 100;
     if (difficulty === '중') points = 250;
-    if (difficulty === '상') points = 500;
+    if (difficulty === '상') points = 1000;
     
     const prevScore = userScore;
     setIsNewRecord(false);
@@ -911,7 +961,8 @@ export default function BlockPuzzleGame() {
                   onClick={() => startGame('상')}
                   className="flex flex-col items-center justify-center p-4 bg-zinc-800/40 hover:bg-rose-950/20 border border-zinc-800 hover:border-rose-500/50 rounded-2xl transition-all group cursor-pointer text-center"
                 >
-                  <span className="text-rose-400 font-extrabold text-lg group-hover:scale-105 transition-transform">상 (500점)</span>
+                  <span className="text-rose-400 font-extrabold text-lg group-hover:scale-105 transition-transform">상 (1000점)</span>
+                  <span className="text-[10px] text-rose-300 font-extrabold mt-0.5">가장 복잡한 퍼즐에 도전하세요!</span>
                   <span className="text-xs text-zinc-400 mt-1">10x10 그리드 • 극한의 두뇌 회전 고난도</span>
                   <span className="text-[11px] text-indigo-400 font-semibold mt-1">
                     최고 기록: {bestTimes['상'] ? formatTime(bestTimes['상']!) : '기록 없음'}
@@ -1212,7 +1263,7 @@ export default function BlockPuzzleGame() {
   // CLEAR SCREEN
   // ------------------------------------------
   const renderClearScreen = () => {
-    const acquired = difficulty === '하' ? 100 : difficulty === '중' ? 250 : 500;
+    const acquired = difficulty === '하' ? 100 : difficulty === '중' ? 250 : 1000;
 
     return (
       <div className="flex flex-col items-center justify-center min-h-screen py-10 px-4 select-none relative overflow-hidden">
