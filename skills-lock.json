@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "skills": {
+    "clonecn": {
+      "source": "hunvreus/clonecn",
+      "sourceType": "github",
+      "skillPath": "skills/clonecn/SKILL.md",
+      "computedHash": "65b9c5d21a46f7beab3958b3f66e138472728a4d0adda1cf54499e6d23da8a69"
+    }
+  }
+}
