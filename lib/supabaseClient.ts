@@ -39,17 +39,24 @@ function createDummySupabaseClient(): any {
       },
       signOut: async () => ({ error: null })
     },
-    from: () => ({
-      select: () => ({
+    from: () => {
+      const selectChain = {
         eq: () => ({
           single: async () => ({ data: null, error: new Error('Supabase Config Missing') })
-        })
-      }),
-      update: () => ({
-        eq: async () => ({ error: new Error('Supabase Config Missing') })
-      }),
-      insert: async () => ({ error: new Error('Supabase Config Missing') })
-    })
+        }),
+        order: () => selectChain,
+        limit: () => selectChain,
+        then: (onfulfilled: any) => Promise.resolve({ data: null, error: new Error('Supabase Config Missing') }).then(onfulfilled)
+      };
+
+      return {
+        select: () => selectChain,
+        update: () => ({
+          eq: async () => ({ error: new Error('Supabase Config Missing') })
+        }),
+        insert: async () => ({ error: new Error('Supabase Config Missing') })
+      };
+    }
   };
 }
 export default supabase;
