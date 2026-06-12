@@ -183,6 +183,9 @@ export default function BlockPuzzleGame() {
   // 클리어 연출
   const [clearedAnimation, setClearedAnimation] = useState<boolean>(false);
   const [particles, setParticles] = useState<{ id: number; emoji: string; left: string; delay: string; duration: string }[]>([]);
+  
+  // 클리어 화면 누적 점수 애니메이션용 최상위 상태
+  const [animatedScore, setAnimatedScore] = useState<number>(0);
 
   // 드래그앤드롭 상태
   const [draggedIdx, setDraggedIdx] = useState<number | null>(null);
@@ -253,6 +256,30 @@ export default function BlockPuzzleGame() {
       if (timerRef.current) clearInterval(timerRef.current);
     };
   }, [timerActive]);
+
+  // 클리어 화면 누적 점수 롤링 애니메이션 처리 이펙트
+  useEffect(() => {
+    if (screen === 'clear') {
+      const acquired = difficulty === '하' ? 100 : difficulty === '중' ? 250 : 500;
+      let start = userScore - acquired;
+      const end = userScore;
+      setAnimatedScore(start);
+
+      if (start === end) return;
+
+      const duration = 1000;
+      const stepTime = Math.abs(Math.floor(duration / (end - start)));
+      const timer = setInterval(() => {
+        start += 1;
+        setAnimatedScore(start);
+        if (start >= end) {
+          clearInterval(timer);
+        }
+      }, Math.max(stepTime, 20));
+
+      return () => clearInterval(timer);
+    }
+  }, [screen, userScore, difficulty]);
 
   // ==========================================
   // 5. Game Core Logic & Gemini AI Integration
@@ -1185,26 +1212,6 @@ export default function BlockPuzzleGame() {
   // CLEAR SCREEN
   // ------------------------------------------
   const renderClearScreen = () => {
-    const [animatedScore, setAnimatedScore] = useState<number>(userScore - (difficulty === '하' ? 100 : difficulty === '중' ? 250 : 500));
-
-    useEffect(() => {
-      let start = userScore - (difficulty === '하' ? 100 : difficulty === '중' ? 250 : 500);
-      const end = userScore;
-      if (start === end) return;
-
-      const duration = 1000;
-      const stepTime = Math.abs(Math.floor(duration / (end - start)));
-      const timer = setInterval(() => {
-        start += 1;
-        setAnimatedScore(start);
-        if (start >= end) {
-          clearInterval(timer);
-        }
-      }, Math.max(stepTime, 20));
-
-      return () => clearInterval(timer);
-    }, [userScore, difficulty]);
-
     const acquired = difficulty === '하' ? 100 : difficulty === '중' ? 250 : 500;
 
     return (
