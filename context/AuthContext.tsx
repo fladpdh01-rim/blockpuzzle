@@ -46,7 +46,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   // 2. Supabase Auth 감시 리스너
   useEffect(() => {
     // 세션 조회
-    supabase.auth.getSession().then(({ data: { session } }) => {
+    supabase.auth.getSession().then((res: any) => {
+      const session = res?.data?.session;
       const currentUser = session?.user ?? null;
       setUser(currentUser);
       if (currentUser) {
@@ -58,7 +59,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     });
 
     // 상태 변화 감지 리스너
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((event: any, session: any) => {
       const currentUser = session?.user ?? null;
       const prevUser = user;
       setUser(currentUser);
@@ -157,7 +158,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         .select('id, total_score, users(email)');
 
       if (allScores) {
-        const mappedPlayers = allScores.map(row => {
+        const mappedPlayers = (allScores as any[]).map((row: any) => {
           let email = '';
           if (row.users) {
             if (Array.isArray(row.users)) {
@@ -171,7 +172,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
             name: email.split('@')[0] || '익명',
             score: row.total_score
           };
-        }).sort((a, b) => b.score - a.score);
+        }).sort((a: any, b: any) => b.score - a.score);
 
         localStorage.setItem('block_puzzle_players', JSON.stringify(mappedPlayers));
       }
