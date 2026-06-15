@@ -496,7 +496,17 @@ export default function BlockPuzzleGame() {
 
   // 클리어 연출
   const [clearedAnimation, setClearedAnimation] = useState<boolean>(false);
-  const [particles, setParticles] = useState<{ id: number; emoji: string; left: string; delay: string; duration: string }[]>([]);
+  const [particles, setParticles] = useState<{
+    id: number;
+    emoji: string;
+    left: string;
+    delay: string;
+    duration: string;
+    color?: string;
+    borderRadius?: string;
+    size?: number;
+    rotation?: number;
+  }[]>([]);
   
   // 클리어 화면 누적 점수 애니메이션용 최상위 상태
   const [animatedScore, setAnimatedScore] = useState<number>(0);
@@ -1267,15 +1277,24 @@ export default function BlockPuzzleGame() {
     setClearedAnimation(true);
 
     setTimeout(() => {
-      // 폭죽 이모지 파티클 생성
-      const emojis = ['🎉', '✨', '🎈', '🎇', '🍰', '🌸', '🍎', '💫'];
-      const newParticles = Array(30).fill(null).map((_, i) => ({
-        id: i,
-        emoji: emojis[Math.floor(Math.random() * emojis.length)],
-        left: `${Math.random() * 90 + 5}%`,
-        delay: `${Math.random() * 2}s`,
-        duration: `${Math.random() * 1.5 + 2}s`
-      }));
+      // 생일 꽃가루(Confetti) 파티클 생성
+      const emojis = ['🎉', '🎊', '🎈', '🎂', '🎁', '🍰', '✨'];
+      const paperColors = ['#ff5964', '#35a7ff', '#ffc857', '#ff92c2', '#8be8cb', '#a0ced9', '#9b5de5', '#f15bb5'];
+      
+      const newParticles = Array(100).fill(null).map((_, i) => {
+        const isEmoji = Math.random() < 0.35; // 35% 확률로 이모지
+        return {
+          id: i,
+          emoji: isEmoji ? emojis[Math.floor(Math.random() * emojis.length)] : '',
+          color: isEmoji ? '' : paperColors[Math.floor(Math.random() * paperColors.length)],
+          borderRadius: isEmoji ? '' : (Math.random() < 0.5 ? '50%' : '2px'),
+          size: isEmoji ? 0 : Math.floor(Math.random() * 8) + 8, // 8px ~ 16px
+          rotation: Math.floor(Math.random() * 360),
+          left: `${Math.random() * 96 + 2}%`,
+          delay: `${Math.random() * 2.5}s`,
+          duration: `${Math.random() * 1.5 + 2.5}s` // 2.5s ~ 4s
+        };
+      });
       setParticles(newParticles);
       
       setScreen('clear');
@@ -1998,7 +2017,20 @@ export default function BlockPuzzleGame() {
               animationDuration: p.duration
             }}
           >
-            {p.emoji}
+            {p.emoji ? (
+              <span className="text-xl md:text-2xl select-none leading-none">{p.emoji}</span>
+            ) : (
+              <div
+                style={{
+                  width: `${p.size}px`,
+                  height: `${p.size}px`,
+                  backgroundColor: p.color,
+                  borderRadius: p.borderRadius,
+                  transform: `rotate(${p.rotation}deg)`,
+                  boxShadow: '0 2px 4px rgba(0,0,0,0.05)'
+                }}
+              />
+            )}
           </div>
         ))}
 
