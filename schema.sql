@@ -104,3 +104,7 @@ CREATE POLICY "인증된 사용자는 본인의 게임 기록만 삽입 가능"
   ON public.game_history FOR INSERT
   TO authenticated
   WITH CHECK (auth.uid() = user_id);
+
+-- user_scores 테이블에 gold 컬럼 추가 (기본값 0)
+ALTER TABLE public.user_scores ADD COLUMN IF NOT EXISTS gold INTEGER DEFAULT 0 NOT NULL;
+

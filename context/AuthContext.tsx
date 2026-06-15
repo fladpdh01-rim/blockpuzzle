@@ -9,9 +9,18 @@ interface AuthContextType {
   guestId: string | null;
   isGuest: boolean;
   userScore: number;
+  gold: number;
+  blockChanges: number;
+  hints: number;
+  hasBoughtItemSet: boolean;
+  hasBoughtTimeSale: boolean;
   loading: boolean;
   signOut: () => Promise<void>;
   updateUserScore: (addScore: number, difficulty: string, time: number) => Promise<void>;
+  purchaseItem: (itemType: 'itemset' | 'gold5000' | 'gold10000' | 'timesale' | 'blockchange' | 'hint') => Promise<{ success: boolean; message: string }>;
+  useBlockChangeItem: () => Promise<boolean>;
+  useHintItem: () => Promise<boolean>;
+  completePurchase: (itemType: 'itemset' | 'gold5000' | 'gold10000') => Promise<void>;
   pendingMigrationScore: number | null;
   migrateGuestScore: (confirm: boolean) => Promise<void>;
 }
@@ -22,15 +31,66 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
   const [guestId, setGuestId] = useState<string | null>(null);
   const [userScore, setUserScore] = useState<number>(0);
+  const [gold, setGold] = useState<number>(0);
+  const [blockChanges, setBlockChanges] = useState<number>(0);
+  const [hints, setHints] = useState<number>(0);
+  const [hasBoughtItemSet, setHasBoughtItemSet] = useState<boolean>(false);
+  const [hasBoughtTimeSale, setHasBoughtTimeSale] = useState<boolean>(false);
   const [loading, setLoading] = useState(true);
   
-  // 게스트 점수 마이그레이션 대기용 상태
+  // 게스트 데이터 마이그레이션 대기용 상태
   const [pendingMigrationScore, setPendingMigrationScore] = useState<number | null>(null);
+  const [pendingMigrationGold, setPendingMigrationGold] = useState<number | null>(null);
+  const [pendingMigrationBlockChanges, setPendingMigrationBlockChanges] = useState<number | null>(null);
+  const [pendingMigrationHints, setPendingMigrationHints] = useState<number | null>(null);
 
   // 게스트 여부 반환
   const isGuest = !user;
 
-  // 1. 게스트 ID 초기 생성/조회 및 게스트 점수 로드
+  // 로컬 스토리지에서 게스트 골드 로드
+  const loadGuestGold = () => {
+    if (typeof window !== 'undefined') {
+      const gGoldStr = localStorage.getItem('block_puzzle_guestGold');
+      if (gGoldStr === null || gGoldStr === '1000') {
+        localStorage.setItem('block_puzzle_guestGold', '0');
+        setGold(0);
+      } else {
+        setGold(parseInt(gGoldStr, 10));
+      }
+    }
+  };
+
+  // 로컬 스토리지에서 아이템 정보 로드
+  const loadUserItems = (id: string, isGuestUser: boolean) => {
+    if (typeof window === 'undefined') return;
+    const key = isGuestUser ? 'block_puzzle_guestItems' : `block_puzzle_items_${id}`;
+    const stored = localStorage.getItem(key);
+    if (stored) {
+      try {
+        const parsed = JSON.parse(stored);
+        setBlockChanges(parsed.blockChanges ?? 0);
+        setHints(parsed.hints ?? 0);
+        setHasBoughtItemSet(parsed.hasBoughtItemSet ?? false);
+        setHasBoughtTimeSale(parsed.hasBoughtTimeSale ?? false);
+      } catch (e) {
+        console.error('Error parsing user items:', e);
+      }
+    } else {
+      setBlockChanges(0);
+      setHints(0);
+      setHasBoughtItemSet(false);
+      setHasBoughtTimeSale(false);
+    }
+  };
+
+  // 로컬 스토리지에 아이템 정보 저장
+  const saveUserItems = (id: string, isGuestUser: boolean, items: { blockChanges: number; hints: number; hasBoughtItemSet: boolean; hasBoughtTimeSale: boolean }) => {
+    if (typeof window === 'undefined') return;
+    const key = isGuestUser ? 'block_puzzle_guestItems' : `block_puzzle_items_${id}`;
+    localStorage.setItem(key, JSON.stringify(items));
+  };
+
+  // 1. 게스트 ID 초기 생성/조회 및 게스트 점수/골드/아이템 로드
   useEffect(() => {
     if (typeof window !== 'undefined') {
       let currentGuestId = localStorage.getItem('block_puzzle_guestId');
@@ -40,6 +100,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         localStorage.setItem('block_puzzle_guestId', currentGuestId);
       }
       setGuestId(currentGuestId);
+      loadGuestGold();
+      loadUserItems('', true);
     }
   }, []);
 
@@ -52,8 +114,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       setUser(currentUser);
       if (currentUser) {
         fetchDbUserScore(currentUser.id);
+        loadUserItems(currentUser.id, false);
       } else {
         loadGuestScore();
+        loadGuestGold();
+        loadUserItems('', true);
       }
       setLoading(false);
     });
@@ -61,22 +126,45 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     // 상태 변화 감지 리스너
     const { data: { subscription } } = supabase.auth.onAuthStateChange((event: any, session: any) => {
       const currentUser = session?.user ?? null;
-      const prevUser = user;
       setUser(currentUser);
 
       if (event === 'SIGNED_IN' && currentUser) {
         fetchDbUserScore(currentUser.id).then(() => {
-          // 게스트 모드에서 누적되었던 점수가 있는지 검사하여 마이그레이션 제안
+          // 게스트 모드에서 누적되었던 점수, 골드, 아이템이 있는지 검사하여 마이그레이션 제안
           const gScoreStr = localStorage.getItem('block_puzzle_guestScore');
           const gScore = gScoreStr ? parseInt(gScoreStr, 10) : 0;
-          if (gScore > 0) {
+          
+          const gGoldStr = localStorage.getItem('block_puzzle_guestGold');
+          const gGold = gGoldStr ? parseInt(gGoldStr, 10) : 0;
+
+          const gItemsStr = localStorage.getItem('block_puzzle_guestItems');
+          let gItems = { blockChanges: 0, hints: 0, hasBoughtItemSet: false, hasBoughtTimeSale: false };
+          if (gItemsStr) {
+            try { gItems = JSON.parse(gItemsStr); } catch (e) {}
+          }
+
+          if (gScore > 0 || gGold > 0 || gItems.blockChanges > 0 || gItems.hints > 0 || gItems.hasBoughtItemSet) {
             setPendingMigrationScore(gScore);
+            setPendingMigrationGold(gGold);
+            setPendingMigrationBlockChanges(gItems.blockChanges);
+            setPendingMigrationHints(gItems.hints);
           }
         });
+        loadUserItems(currentUser.id, false);
       } else if (event === 'SIGNED_OUT') {
         setUserScore(0);
+        setGold(0);
+        setBlockChanges(0);
+        setHints(0);
+        setHasBoughtItemSet(false);
+        setHasBoughtTimeSale(false);
         loadGuestScore();
+        loadGuestGold();
+        loadUserItems('', true);
         setPendingMigrationScore(null);
+        setPendingMigrationGold(null);
+        setPendingMigrationBlockChanges(null);
+        setPendingMigrationHints(null);
       }
       setLoading(false);
     });
@@ -84,22 +172,45 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     return () => {
       subscription.unsubscribe();
     };
-  }, [user]);
+  }, []);
 
-  // DB에서 사용자의 total_score 조회
+  // DB에서 사용자의 total_score 및 gold 조회
   const fetchDbUserScore = async (userId: string) => {
     try {
-      const { data, error } = await supabase
+      let { data, error } = await supabase
         .from('user_scores')
-        .select('total_score')
+        .select('total_score, gold')
         .eq('id', userId)
         .single();
       
+      // self-healing: gold 컬럼이 DB에 없으면 total_score만 다시 조회
+      if (error && error.message && (error.message.includes('column') || error.message.includes('not found') || error.message.includes('gold'))) {
+        console.warn('gold column not found in database. Using local fallback.');
+        const fallbackRes = await supabase
+          .from('user_scores')
+          .select('total_score')
+          .eq('id', userId)
+          .single();
+        
+        if (fallbackRes.data) {
+          data = { total_score: fallbackRes.data.total_score, gold: null };
+          error = null;
+        }
+      }
+
       if (error) {
-        console.error('Error fetching user score:', error);
+        console.error('Error fetching user score & gold:', error);
       } else if (data) {
         setUserScore(data.total_score);
         localStorage.setItem('block_puzzle_myScore', data.total_score.toString());
+        
+        if (data.gold !== null && data.gold !== undefined) {
+          setGold(data.gold);
+          localStorage.setItem(`block_puzzle_gold_${userId}`, data.gold.toString());
+        } else {
+          const localGold = localStorage.getItem(`block_puzzle_gold_${userId}`);
+          setGold(localGold && localGold !== '1000' ? parseInt(localGold, 10) : 0); // 기본 0골드
+        }
       }
     } catch (e) {
       console.error(e);
@@ -129,13 +240,25 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
     if (user) {
       // 1. Supabase user_scores 업데이트
-      const { error: scoreErr } = await supabase
-        .from('user_scores')
-        .update({ total_score: nextScore, updated_at: new Date().toISOString() })
-        .eq('id', user.id);
+      try {
+        const { error: scoreErr } = await supabase
+          .from('user_scores')
+          .update({ 
+            total_score: nextScore, 
+            gold, 
+            updated_at: new Date().toISOString() 
+          })
+          .eq('id', user.id);
 
-      if (scoreErr) {
-        console.error('Failed to update DB score:', scoreErr);
+        if (scoreErr) {
+          // gold 컬럼이 없을 때를 대비해 total_score만 다시 시도
+          await supabase
+            .from('user_scores')
+            .update({ total_score: nextScore, updated_at: new Date().toISOString() })
+            .eq('id', user.id);
+        }
+      } catch (e) {
+        console.error('Failed to update DB score:', e);
       }
 
       // 2. game_history 기록 저장
@@ -150,31 +273,6 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
       if (histErr) {
         console.error('Failed to insert game history:', histErr);
-      }
-
-      // 3. 리더보드 동기화 (players 갱신)
-      const { data: allScores } = await supabase
-        .from('user_scores')
-        .select('id, total_score, users(email)');
-
-      if (allScores) {
-        const mappedPlayers = (allScores as any[]).map((row: any) => {
-          let email = '';
-          if (row.users) {
-            if (Array.isArray(row.users)) {
-              email = row.users[0]?.email || '';
-            } else {
-              const u = row.users as any;
-              email = u.email || '';
-            }
-          }
-          return {
-            name: email.split('@')[0] || '익명',
-            score: row.total_score
-          };
-        }).sort((a: any, b: any) => b.score - a.score);
-
-        localStorage.setItem('block_puzzle_players', JSON.stringify(mappedPlayers));
       }
     } else {
       // 게스트 모드인 경우 로컬스토리지에만 저장
@@ -196,7 +294,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     }
   };
 
-  // 게스트 점수 마이그레이션 수락/거절 처리
+  // 게스트 점수 및 골드/아이템 마이그레이션 수락/거절 처리
   const migrateGuestScore = async (confirm: boolean) => {
     if (!user || pendingMigrationScore === null) return;
 
@@ -205,11 +303,45 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       setUserScore(mergedScore);
       localStorage.setItem('block_puzzle_myScore', mergedScore.toString());
 
+      const mergedGold = gold + (pendingMigrationGold ?? 0);
+      setGold(mergedGold);
+      localStorage.setItem(`block_puzzle_gold_${user.id}`, mergedGold.toString());
+
+      const mergedBlockChanges = blockChanges + (pendingMigrationBlockChanges ?? 0);
+      const mergedHints = hints + (pendingMigrationHints ?? 0);
+      setBlockChanges(mergedBlockChanges);
+      setHints(mergedHints);
+
+      saveUserItems(user.id, false, {
+        blockChanges: mergedBlockChanges,
+        hints: mergedHints,
+        hasBoughtItemSet: hasBoughtItemSet,
+        hasBoughtTimeSale: hasBoughtTimeSale
+      });
+
       // DB 업데이트
-      await supabase
-        .from('user_scores')
-        .update({ total_score: mergedScore, updated_at: new Date().toISOString() })
-        .eq('id', user.id);
+      try {
+        const { error: scoreErr } = await supabase
+          .from('user_scores')
+          .update({ 
+            total_score: mergedScore, 
+            gold: mergedGold,
+            updated_at: new Date().toISOString() 
+          })
+          .eq('id', user.id);
+
+        if (scoreErr) {
+          await supabase
+            .from('user_scores')
+            .update({ 
+              total_score: mergedScore, 
+              updated_at: new Date().toISOString() 
+            })
+            .eq('id', user.id);
+        }
+      } catch (dbErr) {
+        console.error('Failed to update merged score in DB:', dbErr);
+      }
 
       // game_history에 마이그레이션 보너스 성격으로 적재
       await supabase
@@ -224,7 +356,199 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
     // 마이그레이션이 끝났으므로 로컬 게스트 스코어 및 펜딩 상태 초기화
     localStorage.removeItem('block_puzzle_guestScore');
+    localStorage.removeItem('block_puzzle_guestGold');
+    localStorage.removeItem('block_puzzle_guestItems');
     setPendingMigrationScore(null);
+    setPendingMigrationGold(null);
+    setPendingMigrationBlockChanges(null);
+    setPendingMigrationHints(null);
+  };
+
+  const saveDbGold = async (userId: string, targetGold: number) => {
+    try {
+      await supabase
+        .from('user_scores')
+        .update({ gold: targetGold })
+        .eq('id', userId);
+    } catch (e) {
+      console.error('Failed to sync Gold to Supabase:', e);
+    }
+  };
+
+  const purchaseItem = async (itemType: 'itemset' | 'gold5000' | 'gold10000' | 'timesale' | 'blockchange' | 'hint') => {
+    if (itemType === 'itemset') {
+      if (hasBoughtItemSet) {
+        return { success: false, message: '이미 세트 상품을 구매하셨습니다! (구매 제한: 1개)' };
+      }
+      const nextHasBoughtItemSet = true;
+      const nextBlockChanges = blockChanges + 20;
+      const nextHints = hints + 20;
+
+      setHasBoughtItemSet(nextHasBoughtItemSet);
+      setBlockChanges(nextBlockChanges);
+      setHints(nextHints);
+
+      if (user) {
+        saveUserItems(user.id, false, { blockChanges: nextBlockChanges, hints: nextHints, hasBoughtItemSet: nextHasBoughtItemSet, hasBoughtTimeSale });
+      } else {
+        saveUserItems('', true, { blockChanges: nextBlockChanges, hints: nextHints, hasBoughtItemSet: nextHasBoughtItemSet, hasBoughtTimeSale });
+      }
+      return { success: true, message: '아이템 세트 상품이 구매되었습니다! 보상으로 블럭 변경 20개, 힌트 20개가 즉시 지급됩니다.' };
+    }
+
+    if (itemType === 'gold10000') {
+      const nextGold = gold + 10000;
+      setGold(nextGold);
+      if (user) {
+        localStorage.setItem(`block_puzzle_gold_${user.id}`, nextGold.toString());
+        await saveDbGold(user.id, nextGold);
+      } else {
+        localStorage.setItem('block_puzzle_guestGold', nextGold.toString());
+      }
+      return { success: true, message: '10000 Gold가 지급되었습니다.' };
+    }
+
+    if (itemType === 'gold5000') {
+      const nextGold = gold + 5000;
+      setGold(nextGold);
+      if (user) {
+        localStorage.setItem(`block_puzzle_gold_${user.id}`, nextGold.toString());
+        await saveDbGold(user.id, nextGold);
+      } else {
+        localStorage.setItem('block_puzzle_guestGold', nextGold.toString());
+      }
+      return { success: true, message: '5000 Gold가 지급되었습니다.' };
+    }
+
+    let cost = 0;
+    if (itemType === 'timesale') cost = 100;
+    else if (itemType === 'blockchange') cost = 200;
+    else if (itemType === 'hint') cost = 100;
+
+    if (gold < cost) {
+      return { success: false, message: '골드가 부족합니다.' };
+    }
+
+    if (itemType === 'timesale') {
+      if (hasBoughtTimeSale) {
+        return { success: false, message: '이미 타임 세일 상품을 구매하셨습니다! (구매 제한: 1개)' };
+      }
+      const nextGold = gold - cost;
+      const nextBlockChanges = blockChanges + 1;
+      const nextHasBoughtTimeSale = true;
+      
+      setGold(nextGold);
+      setBlockChanges(nextBlockChanges);
+      setHasBoughtTimeSale(nextHasBoughtTimeSale);
+
+      if (user) {
+        localStorage.setItem(`block_puzzle_gold_${user.id}`, nextGold.toString());
+        await saveDbGold(user.id, nextGold);
+        saveUserItems(user.id, false, { blockChanges: nextBlockChanges, hints, hasBoughtItemSet, hasBoughtTimeSale: nextHasBoughtTimeSale });
+      } else {
+        localStorage.setItem('block_puzzle_guestGold', nextGold.toString());
+        saveUserItems('', true, { blockChanges: nextBlockChanges, hints, hasBoughtItemSet, hasBoughtTimeSale: nextHasBoughtTimeSale });
+      }
+      return { success: true, message: '타임 세일 블럭 변경 아이템 1개를 구매했습니다!' };
+    }
+
+    if (itemType === 'blockchange') {
+      const nextGold = gold - cost;
+      const nextBlockChanges = blockChanges + 1;
+
+      setGold(nextGold);
+      setBlockChanges(nextBlockChanges);
+
+      if (user) {
+        localStorage.setItem(`block_puzzle_gold_${user.id}`, nextGold.toString());
+        await saveDbGold(user.id, nextGold);
+        saveUserItems(user.id, false, { blockChanges: nextBlockChanges, hints, hasBoughtItemSet, hasBoughtTimeSale });
+      } else {
+        localStorage.setItem('block_puzzle_guestGold', nextGold.toString());
+        saveUserItems('', true, { blockChanges: nextBlockChanges, hints, hasBoughtItemSet, hasBoughtTimeSale });
+      }
+      return { success: true, message: '블럭 변경 아이템 1개를 구매했습니다!' };
+    }
+
+    if (itemType === 'hint') {
+      const nextGold = gold - cost;
+      const nextHints = hints + 1;
+
+      setGold(nextGold);
+      setHints(nextHints);
+
+      if (user) {
+        localStorage.setItem(`block_puzzle_gold_${user.id}`, nextGold.toString());
+        await saveDbGold(user.id, nextGold);
+        saveUserItems(user.id, false, { blockChanges, hints: nextHints, hasBoughtItemSet, hasBoughtTimeSale });
+      } else {
+        localStorage.setItem('block_puzzle_guestGold', nextGold.toString());
+        saveUserItems('', true, { blockChanges, hints: nextHints, hasBoughtItemSet, hasBoughtTimeSale });
+      }
+      return { success: true, message: '힌트 아이템 1개를 구매했습니다!' };
+    }
+
+    return { success: false, message: '알 수 없는 상품입니다.' };
+  };
+
+  const useBlockChangeItem = async (): Promise<boolean> => {
+    if (blockChanges <= 0) return false;
+    const nextBlockChanges = blockChanges - 1;
+    setBlockChanges(nextBlockChanges);
+    if (user) {
+      saveUserItems(user.id, false, { blockChanges: nextBlockChanges, hints, hasBoughtItemSet, hasBoughtTimeSale });
+    } else {
+      saveUserItems('', true, { blockChanges: nextBlockChanges, hints, hasBoughtItemSet, hasBoughtTimeSale });
+    }
+    return true;
+  };
+
+  const useHintItem = async (): Promise<boolean> => {
+    if (hints <= 0) return false;
+    const nextHints = hints - 1;
+    setHints(nextHints);
+    if (user) {
+      saveUserItems(user.id, false, { blockChanges, hints: nextHints, hasBoughtItemSet, hasBoughtTimeSale });
+    } else {
+      saveUserItems('', true, { blockChanges, hints: nextHints, hasBoughtItemSet, hasBoughtTimeSale });
+    }
+    return true;
+  };
+
+  const completePurchase = async (itemType: 'itemset' | 'gold5000' | 'gold10000') => {
+    if (itemType === 'itemset') {
+      const nextHasBoughtItemSet = true;
+      const nextBlockChanges = blockChanges + 20;
+      const nextHints = hints + 20;
+
+      setHasBoughtItemSet(nextHasBoughtItemSet);
+      setBlockChanges(nextBlockChanges);
+      setHints(nextHints);
+
+      if (user) {
+        saveUserItems(user.id, false, { blockChanges: nextBlockChanges, hints: nextHints, hasBoughtItemSet: nextHasBoughtItemSet, hasBoughtTimeSale });
+      } else {
+        saveUserItems('', true, { blockChanges: nextBlockChanges, hints: nextHints, hasBoughtItemSet: nextHasBoughtItemSet, hasBoughtTimeSale });
+      }
+    } else if (itemType === 'gold10000') {
+      const nextGold = gold + 10000;
+      setGold(nextGold);
+      if (user) {
+        localStorage.setItem(`block_puzzle_gold_${user.id}`, nextGold.toString());
+        await saveDbGold(user.id, nextGold);
+      } else {
+        localStorage.setItem('block_puzzle_guestGold', nextGold.toString());
+      }
+    } else if (itemType === 'gold5000') {
+      const nextGold = gold + 5000;
+      setGold(nextGold);
+      if (user) {
+        localStorage.setItem(`block_puzzle_gold_${user.id}`, nextGold.toString());
+        await saveDbGold(user.id, nextGold);
+      } else {
+        localStorage.setItem('block_puzzle_guestGold', nextGold.toString());
+      }
+    }
   };
 
   return (
@@ -234,9 +558,18 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         guestId,
         isGuest,
         userScore,
+        gold,
+        blockChanges,
+        hints,
+        hasBoughtItemSet,
+        hasBoughtTimeSale,
         loading,
         signOut,
         updateUserScore,
+        purchaseItem,
+        useBlockChangeItem,
+        useHintItem,
+        completePurchase,
         pendingMigrationScore,
         migrateGuestScore
       }}

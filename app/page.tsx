@@ -4,6 +4,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { useAuth } from '../context/AuthContext';
 import { supabase } from '../lib/supabaseClient';
 import Link from 'next/link';
+import { loadTossPayments } from '@tosspayments/tosspayments-sdk';
 
 // ==========================================
 // 1. Types & Data Definitions
@@ -24,6 +25,7 @@ interface Block {
 
 type ScreenType = 'home' | 'playing' | 'clear';
 type DifficultyType = '하' | '중' | '상';
+type TabType = 'play' | 'leaderboard' | 'profile';
 
 // 5x5, 7x7, 10x10 패턴 정의 (사과, 꽃, 케이크)
 const PATTERNS: Record<DifficultyType, Record<'사과' | '꽃' | '케이크', boolean[][]>> = {
@@ -121,24 +123,182 @@ const PATTERNS: Record<DifficultyType, Record<'사과' | '꽃' | '케이크', bo
 
 // 디폴트 로컬 랭킹 데이터 (Supabase 동기화 전 혹은 게스트용)
 const DEFAULT_PLAYERS: Player[] = [
-  { name: '빛나는퍼즐왕', score: 2500 },
-  { name: '블록마스터', score: 1800 },
-  { name: '도전가', score: 1000 }
+  { name: 'ZenMaster', score: 2450 },
+  { name: 'CloudCatcher', score: 1800 },
+  { name: 'BlockBuster', score: 1000 }
 ];
 
-// 블록 템플릿 정의 (10가지)
+// 블록 템플릿 정의 (파스텔 블루 / 골드 매핑)
 const BLOCK_TEMPLATES: { shape: number[][]; color: string }[] = [
-  { shape: [[1]], color: 'from-pink-500 to-rose-500' }, // 1x1
-  { shape: [[1, 1]], color: 'from-amber-400 to-orange-500' }, // 2x1 가로
-  { shape: [[1], [1]], color: 'from-orange-400 to-red-500' }, // 1x2 세로
-  { shape: [[1, 1, 1]], color: 'from-emerald-400 to-teal-500' }, // 3x1 가로
-  { shape: [[1], [1], [1]], color: 'from-teal-400 to-cyan-500' }, // 1x3 세로
-  { shape: [[1, 1, 1, 1]], color: 'from-cyan-400 to-blue-500' }, // 4x1 가로
-  { shape: [[1], [1], [1], [1]], color: 'from-blue-400 to-indigo-500' }, // 1x4 세로
-  { shape: [[1, 1], [1, 1]], color: 'from-blue-500 to-indigo-600' }, // 2x2 사각형
-  { shape: [[1, 0], [1, 1]], color: 'from-violet-500 to-purple-600' }, // L자 (3칸)
-  { shape: [[0, 1, 0], [1, 1, 1]], color: 'from-fuchsia-500 to-pink-600' } // T자 (4칸)
+  { shape: [[1]], color: 'from-[#BCE3E6] to-[#A2CBD0]' }, // 1x1 (Blue)
+  { shape: [[1, 1]], color: 'from-[#FEE282] to-[#FED650]' }, // 2x1 가로 (Gold)
+  { shape: [[1], [1]], color: 'from-[#FEE282] to-[#FED650]' }, // 1x2 세로 (Gold)
+  { shape: [[1, 1, 1]], color: 'from-[#BCE3E6] to-[#A2CBD0]' }, // 3x1 가로 (Blue)
+  { shape: [[1], [1], [1]], color: 'from-[#BCE3E6] to-[#A2CBD0]' }, // 1x3 세로 (Blue)
+  { shape: [[1, 1, 1, 1]], color: 'from-[#BCE3E6] to-[#A2CBD0]' }, // 4x1 가로 (Blue)
+  { shape: [[1], [1], [1], [1]], color: 'from-[#BCE3E6] to-[#A2CBD0]' }, // 1x4 세로 (Blue)
+  { shape: [[1, 1], [1, 1]], color: 'from-[#FEE282] to-[#FED650]' }, // 2x2 사각형 (Gold)
+  { shape: [[1, 0], [1, 1]], color: 'from-[#FEE282] to-[#FED650]' }, // L자 (Gold)
+  { shape: [[0, 1, 0], [1, 1, 1]], color: 'from-[#BCE3E6] to-[#A2CBD0]' } // T자 (Blue)
 ];
+
+// 리그 구분을 스코어에 따라 반환
+const getDivisionName = (score: number) => {
+  if (score >= 2450) return 'Pro League';
+  if (score >= 1800) return 'Diamond III';
+  if (score >= 1200) return 'Diamond II';
+  if (score >= 800) return 'Diamond I';
+  return 'Platinum I';
+};
+
+// 완성된 그림의 주제에 맞는 테마 색상을 반환하는 헬퍼 함수
+const getThematicCellColor = (shapeName: '사과' | '꽃' | '케이크' | string, r: number, c: number, size: number): string => {
+  if (shapeName === '사과') {
+    // 사과: 윗부분(줄기/잎)은 녹색/갈색, 몸통은 빨간색
+    if (r <= 1) {
+      if (size === 5 && r === 0 && c === 2) return 'from-emerald-500 to-green-600';
+      if (size === 7 && r === 0 && (c === 3 || c === 4)) return 'from-emerald-500 to-green-600';
+      if (size === 7 && r === 1 && c === 2) return 'from-amber-700 to-amber-800';
+      if (size === 10 && r === 0 && (c === 5 || c === 6)) return 'from-emerald-500 to-green-600';
+      if (size === 10 && r === 1 && c === 4) return 'from-amber-700 to-amber-800';
+    }
+    return 'from-rose-500 to-red-600'; // 사과 몸통
+  }
+  
+  if (shapeName === '꽃') {
+    // 꽃: 하단(줄기/잎)은 녹색, 가운데는 노란색, 꽃잎은 분홍색
+    if (size === 5) {
+      if (r >= 3) return 'from-emerald-500 to-green-600'; // 줄기/잎
+      if ((r === 1 && c === 2) || (r === 2 && c === 2)) return 'from-yellow-400 to-amber-500'; // 꽃술
+      return 'from-pink-400 to-rose-450'; // 꽃잎
+    }
+    if (size === 7) {
+      if (r >= 4) return 'from-emerald-500 to-green-600'; // 줄기
+      if ((r === 1 && c === 3) || (r === 2 && c === 3) || (r === 3 && c === 3)) return 'from-yellow-400 to-amber-500'; // 꽃술
+      return 'from-pink-400 to-rose-450'; // 꽃잎
+    }
+    if (size === 10) {
+      if (r >= 6) return 'from-emerald-500 to-green-600'; // 줄기
+      if ((r === 2 && (c === 4 || c === 5)) || (r === 3 && (c === 4 || c === 5)) || (r === 4 && (c === 3 || c === 6))) {
+        return 'from-yellow-400 to-amber-500'; // 꽃술
+      }
+      return 'from-pink-400 to-rose-450'; // 꽃잎
+    }
+    return 'from-pink-400 to-rose-450';
+  }
+  
+  if (shapeName === '케이크') {
+    // 케이크: 맨위 체리는 빨간색, 휘핑크림은 흰색/크림색, 빵은 초콜릿색, 접시는 은색/회색
+    if (size === 5) {
+      if (r === 0) return 'from-red-500 to-rose-600'; // 체리
+      if (r === 1) return 'from-[#FFFEE6] to-[#FEDE80]'; // 크림
+      if (r === 2 || r === 3) return 'from-[#6E4933] to-[#4A3020]'; // 초코빵
+      return 'from-slate-350 to-slate-400'; // 접시
+    }
+    if (size === 7) {
+      if (r === 0) return 'from-red-500 to-rose-600'; // 체리
+      if (r === 1 || r === 2) return 'from-[#FFFEE6] to-[#FEDE80]'; // 크림
+      if (r === 3 || r === 4 || r === 5) return 'from-[#6E4933] to-[#4A3020]'; // 초코빵
+      return 'from-slate-350 to-slate-400'; // 접시
+    }
+    if (size === 10) {
+      if (r === 0 || r === 1) return 'from-red-500 to-rose-600'; // 체리
+      if (r >= 2 && r <= 5) return 'from-[#FFFEE6] to-[#FEDE80]'; // 크림
+      if (r >= 6 && r <= 8) return 'from-[#6E4933] to-[#4A3020]'; // 초코빵
+      return 'from-slate-350 to-slate-400'; // 접시
+    }
+    return 'from-[#6E4933] to-[#4A3020]';
+  }
+  
+  return 'from-indigo-400 to-purple-500';
+};
+
+function balanceBlocks(blocks: { shape: number[][]; color: string }[]) {
+  const getShapeStr = (shape: number[][]) => JSON.stringify(shape);
+  const shapesBySize: Record<number, number[][][]> = {
+    1: [[[1]]],
+    2: [[[1, 1]], [[1], [1]]],
+    3: [[[1, 1, 1]], [[1], [1], [1]], [[1, 0], [1, 1]]],
+    4: [[[1, 1, 1, 1]], [[1], [1], [1], [1]], [[1, 1], [1, 1]], [[0, 1, 0], [1, 1, 1]]]
+  };
+
+  const getBlockSize = (shape: number[][]) => {
+    let size = 0;
+    shape.forEach(row => row.forEach(val => { if (val === 1) size++; }));
+    return size;
+  };
+
+  let changed = true;
+  let iterations = 0;
+  while (changed && iterations < 100) {
+    iterations++;
+    changed = false;
+    const freq: Record<string, number> = {};
+    blocks.forEach(b => {
+      const s = getShapeStr(b.shape);
+      freq[s] = (freq[s] || 0) + 1;
+    });
+
+    const overUsedShapeStr = Object.keys(freq).find(s => freq[s] > 3);
+    if (overUsedShapeStr) {
+      const overUsedShape = JSON.parse(overUsedShapeStr);
+      const size = getBlockSize(overUsedShape);
+      const overUsedIdx = blocks.findIndex(b => getShapeStr(b.shape) === overUsedShapeStr);
+      if (overUsedIdx === -1) continue;
+
+      const candidates = shapesBySize[size] || [];
+      const bestReplacement = candidates.find(cand => {
+        const candStr = getShapeStr(cand);
+        return (freq[candStr] || 0) < 3;
+      });
+
+      if (bestReplacement) {
+        blocks[overUsedIdx].shape = bestReplacement;
+        changed = true;
+      } else {
+        if (size === 1) {
+          const size2Candidates = shapesBySize[2];
+          const bestSize2 = size2Candidates.find(cand => (freq[getShapeStr(cand)] || 0) < 3);
+          if (bestSize2) {
+            const second1x1Idx = blocks.findIndex((b, idx) => idx !== overUsedIdx && getShapeStr(b.shape) === overUsedShapeStr);
+            if (second1x1Idx !== -1) {
+              blocks[overUsedIdx].shape = bestSize2;
+              blocks.splice(second1x1Idx, 1);
+              changed = true;
+            }
+          }
+        } else if (size === 2) {
+          const size1Str = getShapeStr([[1]]);
+          if ((freq[size1Str] || 0) < 2) {
+            blocks[overUsedIdx].shape = [[1]];
+            blocks.push({ shape: [[1]], color: blocks[overUsedIdx].color });
+            changed = true;
+          }
+        } else if (size === 3) {
+          const size2Candidates = shapesBySize[2];
+          const bestSize2 = size2Candidates.find(cand => (freq[getShapeStr(cand)] || 0) < 3);
+          const size1Str = getShapeStr([[1]]);
+          if (bestSize2 && (freq[size1Str] || 0) < 3) {
+            blocks[overUsedIdx].shape = bestSize2;
+            blocks.push({ shape: [[1]], color: blocks[overUsedIdx].color });
+            changed = true;
+          }
+        } else if (size === 4) {
+          const size2Candidates = shapesBySize[2];
+          const availableSize2 = size2Candidates.filter(cand => (freq[getShapeStr(cand)] || 0) < 3);
+          if (availableSize2.length >= 1) {
+            const shp = availableSize2[0];
+            blocks[overUsedIdx].shape = shp;
+            const secondShp = availableSize2[1] || shp;
+            blocks.push({ shape: secondShp, color: blocks[overUsedIdx].color });
+            changed = true;
+          }
+        }
+      }
+    }
+  }
+  return blocks;
+}
 
 export default function BlockPuzzleGame() {
   // ==========================================
@@ -149,14 +309,60 @@ export default function BlockPuzzleGame() {
     guestId, 
     isGuest, 
     userScore, 
-    signOut, 
-    updateUserScore, 
+    gold,
+    blockChanges,
+    hints,
+    hasBoughtItemSet,
+    hasBoughtTimeSale,
+    signOut,
+    updateUserScore,
+    purchaseItem,
+    useBlockChangeItem,
+    useHintItem,
     pendingMigrationScore, 
     migrateGuestScore 
   } = useAuth();
 
+  const [activeTab, setActiveTab] = useState<TabType>('play');
   const [screen, setScreen] = useState<ScreenType>('home');
   const [showDiffModal, setShowDiffModal] = useState(false);
+  const [showShopModal, setShowShopModal] = useState(false);
+  const [shopTab, setShopTab] = useState<'gold' | 'cash'>('gold');
+  const [selectedShopItem, setSelectedShopItem] = useState<{
+    id: string;
+    name: string;
+    description: string;
+    priceText: string;
+    originalPriceText?: string;
+    badge?: string;
+    icon: string;
+  } | null>(null);
+  const [shopMessage, setShopMessage] = useState<{ text: string; success: boolean } | null>(null);
+  
+  // 결제 관련 상태
+  const [showBillingModal, setShowBillingModal] = useState(false);
+  const [payerName, setPayerName] = useState('');
+  const [payerEmail, setPayerEmail] = useState('');
+  const [payerNameError, setPayerNameError] = useState('');
+  const [payerEmailError, setPayerEmailError] = useState('');
+  const [payerLoading, setPayerLoading] = useState(false);
+
+  // 게임 아이템 사용 관련 상태
+  const [usingItem, setUsingItem] = useState<'blockchange' | 'hint' | null>(null);
+  const [hintHighlightCell, setHintHighlightCell] = useState<{ r: number; c: number; width: number; height: number } | null>(null);
+  const [selectedPoolBlockIdxToChange, setSelectedPoolBlockIdxToChange] = useState<number | null>(null);
+  const [showShapeSelectorModal, setShowShapeSelectorModal] = useState(false);
+
+  // Refined block change & 6-step Hint states
+  const [showPoolBlockSelectorModal, setShowPoolBlockSelectorModal] = useState(false);
+  const [generatedShapesLog, setGeneratedShapesLog] = useState<string[]>([]);
+  const [hintSelectMode, setHintSelectMode] = useState(false);
+  const [selectedHintBlockIdx, setSelectedHintBlockIdx] = useState<number | null>(null);
+  const [hintHighlightCells, setHintHighlightCells] = useState<{ r: number; c: number }[]>([]);
+  const [hintTimer, setHintTimer] = useState<number | null>(null);
+  const [hintFadeOut, setHintFadeOut] = useState(false);
+  const hintIntervalRef = useRef<any>(null);
+
   const [difficulty, setDifficulty] = useState<DifficultyType | null>(null);
   const [gridSize, setGridSize] = useState<number>(5);
   
@@ -168,6 +374,7 @@ export default function BlockPuzzleGame() {
   // Gemini 블록 큐 및 현재 활성화된 3개 블록 풀
   const [geminiBlockQueue, setGeminiBlockQueue] = useState<Omit<Block, 'id' | 'width' | 'height'>[]>([]);
   const [blockPool, setBlockPool] = useState<(Block | null)[]>([]);
+  const [history, setHistory] = useState<{ grid: (string | null)[][]; blockPool: (Block | null)[]; geminiBlockQueue: Omit<Block, 'id' | 'width' | 'height'>[] }[]>([]);
   const [aiGenerating, setAiGenerating] = useState<boolean>(false);
   const [isAiMode, setIsAiMode] = useState<boolean>(true);
   
@@ -196,46 +403,32 @@ export default function BlockPuzzleGame() {
   const [dragPos, setDragPos] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
   const [previewCell, setPreviewCell] = useState<{ r: number; c: number } | null>(null);
 
-  // UI 헤더 프로필 팝오버 상태
-  const [showProfilePopover, setShowProfilePopover] = useState(false);
-
   // DOM Refs
   const gridRef = useRef<HTMLDivElement>(null);
   const timerRef = useRef<NodeJS.Timeout | null>(null);
 
   // Supabase 실시간 리더보드 동기화 (is_guest = false 대상)
-  // users 테이블은 구글 계정으로 로그인된 정식 회원만 적재되므로, 
-  // users(email) 조인 쿼리 결과 중 users가 존재하는 데이터만 추출하여 랭킹에 표시하면 게스트가 완벽히 제외됩니다.
-  const fetchLeaderboard = async () => {
+  const fetchLeaderboard = async (overrideScore?: number) => {
     try {
-      const { data, error } = await (supabase as any)
-        .from('user_scores')
-        .select('id, total_score, users(email)')
-        .order('total_score', { ascending: false })
-        .limit(10);
-
-      if (data && !error) {
-        const mapped: Player[] = [];
-        data.forEach((row: any) => {
-          let email = '';
-          if (row.users) {
-            if (Array.isArray(row.users)) {
-              email = row.users[0]?.email || '';
-            } else {
-              email = row.users.email || '';
-            }
-          }
-          // 이메일이 매칭되는 경우만 (즉, 정식 계정 사용자이고 게스트가 아닌 경우) 랭킹 등록
-          if (email) {
-            mapped.push({
-              name: email.split('@')[0] || '익명',
-              score: row.total_score
-            });
-          }
-        });
-        
-        // 획득한 실시간 TOP 3 랭킹 적용
+      const res = await fetch('/api/leaderboard');
+      if (res.ok) {
+        let mapped = await res.json();
         if (mapped.length > 0) {
+          // 게스트인 경우 로컬 점수를 수동으로 병합하여 리더보드에 반영
+          const activeUser = user;
+          const activeScore = overrideScore !== undefined ? overrideScore : userScore;
+
+          if (!activeUser && activeScore > 0) {
+            const currentGuestId = guestId || 'guestGuest';
+            const guestIdx = mapped.findIndex((p: any) => p.name === currentGuestId);
+            if (guestIdx !== -1) {
+              mapped[guestIdx].score = Math.max(mapped[guestIdx].score, activeScore);
+            } else {
+              mapped.push({ name: currentGuestId, score: activeScore });
+            }
+            mapped.sort((a: any, b: any) => b.score - a.score);
+          }
+
           setPlayers(mapped);
           localStorage.setItem('block_puzzle_players', JSON.stringify(mapped));
         }
@@ -245,10 +438,10 @@ export default function BlockPuzzleGame() {
     }
   };
 
-  // 사용자 로그인/아웃 및 점수 획득 시점 리더보드 실시간 동기화
+  // 사용자 로그인/아웃 시점 리더보드 실시간 동기화
   useEffect(() => {
     fetchLeaderboard();
-  }, [user, userScore]);
+  }, [user]);
 
   // ==========================================
   // 3. Initial Load & Storage Sync
@@ -284,12 +477,10 @@ export default function BlockPuzzleGame() {
   // 점수와 플레이어 랭킹 변화에 따른 내 등수 계산
   useEffect(() => {
     const sorted = [...players].sort((a, b) => b.score - a.score);
-    const myName = user ? (user.email?.split('@')[0] || '나(Me)') : (guestId || 'guest');
-    
     // 내 등수 산출: 나보다 높은 사람의 수 + 1
     const currentRank = sorted.filter(p => p.score > userScore).length + 1;
     setRank(currentRank);
-  }, [userScore, players, user, guestId]);
+  }, [userScore, players]);
 
   // ==========================================
   // 4. Timer Hooks
@@ -346,9 +537,19 @@ export default function BlockPuzzleGame() {
 
   // 랜덤 블록 생성 (Fallback 모드용)
   const generateRandomBlock = (): Block => {
-    const templateIdx = Math.floor(Math.random() * BLOCK_TEMPLATES.length);
-    const template = BLOCK_TEMPLATES[templateIdx];
+    const availableTemplates = BLOCK_TEMPLATES.filter(tmpl => {
+      const shapeStr = JSON.stringify(tmpl.shape);
+      const count = generatedShapesLog.filter(s => s === shapeStr).length;
+      return count < 3;
+    });
+
+    const templatesToUse = availableTemplates.length > 0 ? availableTemplates : BLOCK_TEMPLATES;
+    const template = templatesToUse[Math.floor(Math.random() * templatesToUse.length)];
     const shape = template.shape;
+    const shapeStr = JSON.stringify(shape);
+
+    setGeneratedShapesLog(prev => [...prev, shapeStr]);
+
     return {
       id: Math.random().toString(36).substr(2, 9),
       shape,
@@ -369,6 +570,7 @@ export default function BlockPuzzleGame() {
     // 격자 초기화
     const newGrid: (string | null)[][] = Array(size).fill(null).map(() => Array(size).fill(null));
     setGrid(newGrid);
+    setHistory([]);
 
     // 그림 랜덤 선택
     const shapes: ('사과' | '꽃' | '케이크')[] = ['사과', '꽃', '케이크'];
@@ -381,6 +583,7 @@ export default function BlockPuzzleGame() {
     setShowDiffModal(false);
     setAiGenerating(true);
     setScreen('playing');
+    setActiveTab('play');
 
     try {
       // 1. Gemini AI 블록 생성 API 호출
@@ -402,16 +605,19 @@ export default function BlockPuzzleGame() {
       const data = await res.json();
       const generated: Omit<Block, 'id' | 'width' | 'height'>[] = data.blocks;
 
+      // Balance blocks using the same algorithm
+      const balancedGenerated = balanceBlocks(generated as any);
+
       // AI 모드 활성화
       setIsAiMode(true);
 
       // 2. 받아온 블록 리스트를 큐에 보관
-      setGeminiBlockQueue(generated);
+      setGeminiBlockQueue(balancedGenerated);
 
       // 3. 큐에서 최초 3개 블록을 꺼내 풀(Pool) 구성
       const initialPool: (Block | null)[] = [];
-      const blocksToTake = generated.slice(0, 3);
-      const remainingQueue = generated.slice(3);
+      const blocksToTake = balancedGenerated.slice(0, 3);
+      const remainingQueue = balancedGenerated.slice(3);
 
       blocksToTake.forEach((b) => {
         initialPool.push({
@@ -428,6 +634,9 @@ export default function BlockPuzzleGame() {
         initialPool.push(null);
       }
 
+      const initialLog = balancedGenerated.map(b => JSON.stringify(b.shape));
+      setGeneratedShapesLog(initialLog);
+
       setBlockPool(initialPool);
       setGeminiBlockQueue(remainingQueue);
 
@@ -439,17 +648,18 @@ export default function BlockPuzzleGame() {
       setIsAiMode(false);
 
       // Fallback: Gemini 실패 시 기본 블록 템플릿 무한 모드로 세팅
-      const fallbackTemplates = [
-        { shape: [[1]], color: 'from-pink-500 to-rose-500' },
-        { shape: [[1, 1]], color: 'from-amber-400 to-orange-500' },
-        { shape: [[1], [1]], color: 'from-orange-400 to-red-500' },
-        { shape: [[1, 1, 1]], color: 'from-emerald-400 to-teal-500' },
-        { shape: [[1], [1], [1]], color: 'from-teal-400 to-cyan-500' },
-        { shape: [[1, 1], [1, 1]], color: 'from-blue-500 to-indigo-600' }
-      ];
+      const fallbackTemplates = BLOCK_TEMPLATES;
 
+      const initialLog: string[] = [];
       const initialPool = Array(3).fill(null).map(() => {
-        const t = fallbackTemplates[Math.floor(Math.random() * fallbackTemplates.length)];
+        const availableTemplates = fallbackTemplates.filter(t => {
+          const s = JSON.stringify(t.shape);
+          const count = initialLog.filter(x => x === s).length;
+          return count < 3;
+        });
+        const templatesToUse = availableTemplates.length > 0 ? availableTemplates : fallbackTemplates;
+        const t = templatesToUse[Math.floor(Math.random() * templatesToUse.length)];
+        initialLog.push(JSON.stringify(t.shape));
         return {
           id: Math.random().toString(36).substr(2, 9),
           shape: t.shape,
@@ -458,6 +668,7 @@ export default function BlockPuzzleGame() {
           height: t.shape.length
         };
       });
+      setGeneratedShapesLog(initialLog);
       setBlockPool(initialPool);
       setGeminiBlockQueue([]); // 큐는 없음
     } finally {
@@ -477,6 +688,236 @@ export default function BlockPuzzleGame() {
   const quitGame = () => {
     setTimerActive(false);
     setScreen('home');
+    setUsingItem(null);
+    setHintHighlightCell(null);
+    clearHint();
+    setGeneratedShapesLog([]);
+  };
+
+  // Toss Payments 결제 실행
+  const handleTossPayment = async () => {
+    let isValid = true;
+    if (!payerName.trim()) {
+      setPayerNameError('이름을 입력해주세요.');
+      isValid = false;
+    } else {
+      setPayerNameError('');
+    }
+
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!payerEmail.trim()) {
+      setPayerEmailError('이메일을 입력해주세요.');
+      isValid = false;
+    } else if (!emailRegex.test(payerEmail.trim())) {
+      setPayerEmailError('올바른 이메일 주소를 입력해주세요.');
+      isValid = false;
+    } else {
+      setPayerEmailError('');
+    }
+
+    if (!isValid) return;
+    if (!selectedShopItem) return;
+
+    setPayerLoading(true);
+
+    try {
+      const clientKey = process.env.NEXT_PUBLIC_TOSS_CLIENT_KEY || 'test_ck_D5GePWvy4GKWpbvL152jVNZ4LM9Q';
+      const tossPayments = await loadTossPayments(clientKey);
+
+      const customerKey = user?.id || guestId || 'guest-' + Math.floor(1000 + Math.random() * 9000);
+      const orderId = 'INU-' + Date.now();
+      const orderName = '인천대학교 기초교육원 교양 교과목 결제';
+      
+      let amount = 4900;
+      if (selectedShopItem.id === 'gold10000') amount = 10000;
+      else if (selectedShopItem.id === 'gold5000') amount = 5000;
+
+      const successUrl = `${window.location.origin}/payment/success`;
+      const failUrl = `${window.location.origin}/payment/fail`;
+
+      localStorage.setItem('block_puzzle_pending_purchase', JSON.stringify({
+        orderId,
+        itemType: selectedShopItem.id,
+        userId: customerKey
+      }));
+
+      const payment = tossPayments.payment({ customerKey });
+      
+      await payment.requestPayment({
+        method: 'CARD',
+        amount: {
+          currency: 'KRW',
+          value: amount
+        },
+        orderId,
+        orderName,
+        successUrl,
+        failUrl,
+        customerName: payerName.trim(),
+        customerEmail: payerEmail.trim()
+      });
+    } catch (e: any) {
+      console.error('Toss Payment failed:', e);
+      alert('결제 창 실행 중 오류가 발생했습니다: ' + (e.message || e));
+    } finally {
+      setPayerLoading(false);
+    }
+  };
+
+  // 블럭 변경 아이템 사용 트리거
+  const triggerBlockChangeUsage = () => {
+    if (usingItem === 'blockchange') {
+      setUsingItem(null);
+      return;
+    }
+    if (blockChanges <= 0) {
+      triggerWarning('블럭 변경 아이템이 부족합니다.');
+      return;
+    }
+    clearHint();
+    setUsingItem('blockchange');
+    triggerWarning('변경할 블록을 아래에서 선택해 주세요.');
+  };
+
+  // 힌트 아이템 사용 트리거
+  const triggerHintUsage = () => {
+    if (usingItem === 'hint') {
+      clearHint();
+      return;
+    }
+    if (hints <= 0) {
+      triggerWarning('힌트를 모두 사용했습니다');
+      return;
+    }
+    clearHint();
+    setHintSelectMode(true);
+    setUsingItem('hint');
+    triggerWarning('힌트를 받을 블록을 아래에서 선택해 주세요.');
+  };
+
+  // 블록 풀의 블록 클릭 핸들러 (아이템 사용 모드일 때 동작 분기)
+  const handleBlockPoolSlotClick = (idx: number) => {
+    const block = blockPool[idx];
+    if (!block) return;
+    setSelectedPoolBlockIdxToChange(idx);
+    setShowPoolBlockSelectorModal(false);
+    setShowShapeSelectorModal(true);
+  };
+
+  const clearHint = () => {
+    if (hintIntervalRef.current) {
+      clearInterval(hintIntervalRef.current);
+      hintIntervalRef.current = null;
+    }
+    setHintHighlightCells([]);
+    setSelectedHintBlockIdx(null);
+    setHintTimer(null);
+    setHintFadeOut(false);
+    setHintSelectMode(false);
+    setUsingItem(null);
+  };
+
+  const handleBlockPoolSlotClickForHint = async (idx: number) => {
+    const block = blockPool[idx];
+    if (!block) return;
+
+    setSelectedHintBlockIdx(idx);
+
+    const validPositions: { r: number; c: number }[] = [];
+    const bh = block.shape.length;
+    const bw = block.shape[0].length;
+    for (let r = 0; r <= gridSize - bh; r++) {
+      for (let c = 0; c <= gridSize - bw; c++) {
+        if (canPlaceBlock(block.shape, r, c)) {
+          for (let br = 0; br < bh; br++) {
+            for (let bc = 0; bc < bw; bc++) {
+              if (block.shape[br][bc] === 1) {
+                const gr = r + br;
+                const gc = c + bc;
+                if (!validPositions.some(p => p.r === gr && p.c === gc)) {
+                  validPositions.push({ r: gr, c: gc });
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+
+    if (validPositions.length === 0) {
+      triggerWarning('이 블록을 배치할 수 있는 유효한 공간이 없습니다!');
+      clearHint();
+      return;
+    }
+
+    const success = await useHintItem();
+    if (success) {
+      setHintHighlightCells(validPositions);
+      setHintSelectMode(false);
+      setUsingItem(null);
+
+      setHintTimer(5);
+      if (hintIntervalRef.current) {
+        clearInterval(hintIntervalRef.current);
+      }
+
+      let currentSec = 5;
+      hintIntervalRef.current = setInterval(() => {
+        currentSec -= 1;
+        if (currentSec <= 0) {
+          if (hintIntervalRef.current) {
+            clearInterval(hintIntervalRef.current);
+            hintIntervalRef.current = null;
+          }
+          setHintFadeOut(true);
+          setTimeout(() => {
+            setHintHighlightCells([]);
+            setSelectedHintBlockIdx(null);
+            setHintTimer(null);
+            setHintFadeOut(false);
+          }, 500);
+        } else {
+          setHintTimer(currentSec);
+        }
+      }, 1000);
+    } else {
+      triggerWarning('힌트 아이템 사용에 실패했습니다.');
+      clearHint();
+    }
+  };
+
+  // 블록 형상 선택기에서 템플릿 선택 완료 시 호출
+  const handleSelectBlockShape = async (templateShape: number[][]) => {
+    if (selectedPoolBlockIdxToChange === null) return;
+    
+    const success = await useBlockChangeItem();
+    if (success) {
+      const templateColors = [
+        'from-[#BCE3E6] to-[#A2CBD0]',
+        'from-[#FEE282] to-[#FED650]',
+        'from-[#FFD369] to-[#FFA800]'
+      ];
+      const randomColor = templateColors[Math.floor(Math.random() * templateColors.length)];
+      
+      const newPool = [...blockPool];
+      newPool[selectedPoolBlockIdxToChange] = {
+        id: Math.random().toString(36).substr(2, 9),
+        shape: templateShape,
+        color: randomColor,
+        width: templateShape[0].length,
+        height: templateShape.length
+      };
+      
+      setBlockPool(newPool);
+      setGeneratedShapesLog(prev => [...prev, JSON.stringify(templateShape)]);
+      triggerWarning('블록이 변경되었습니다!');
+    } else {
+      triggerWarning('아이템 사용에 실패했습니다.');
+    }
+    
+    setShowShapeSelectorModal(false);
+    setSelectedPoolBlockIdxToChange(null);
+    setUsingItem(null);
   };
 
   // 남은 채워야 할 격자 칸 개수 구하기
@@ -519,7 +960,7 @@ export default function BlockPuzzleGame() {
             return false;
           }
 
-          // [추가] 목표 패턴 영역이 아닌 곳에는 배치 불가능하게 차단
+          // 목표 패턴 영역이 아닌 곳에는 배치 불가능하게 차단
           if (targetPattern && targetPattern.length > 0) {
             if (!targetPattern[targetRow]?.[targetCol]) {
               return false;
@@ -541,6 +982,16 @@ export default function BlockPuzzleGame() {
       return;
     }
 
+    // 뒤로가기를 위한 현재 상태 기록 (깊은 복사)
+    setHistory(prev => [
+      ...prev,
+      {
+        grid: grid.map(row => [...row]),
+        blockPool: blockPool.map(b => b ? { ...b, shape: b.shape.map(r => [...r]) } : null),
+        geminiBlockQueue: geminiBlockQueue.map(b => ({ ...b, shape: b.shape.map(r => [...r]) }))
+      }
+    ]);
+
     // 그리드에 색 채우기
     const newGrid = grid.map(row => [...row]);
     const bh = block.shape.length;
@@ -554,6 +1005,7 @@ export default function BlockPuzzleGame() {
       }
     }
     setGrid(newGrid);
+    clearHint();
 
     // 사용한 블록을 큐에서 1개 공급받아 채워 넣음
     const newPool = [...blockPool];
@@ -584,6 +1036,19 @@ export default function BlockPuzzleGame() {
 
     // 클리어 판정 검사
     checkGameClear(newGrid, newPool);
+  };
+
+  // 이전 수 실행 취소 (Undo)
+  const undoLastMove = () => {
+    if (history.length === 0 || clearedAnimation) return;
+
+    const previousState = history[history.length - 1];
+    setGrid(previousState.grid);
+    setBlockPool(previousState.blockPool);
+    setGeminiBlockQueue(previousState.geminiBlockQueue);
+
+    setHistory(prev => prev.slice(0, -1));
+    clearHint();
   };
 
   // 클리어 검사
@@ -627,11 +1092,13 @@ export default function BlockPuzzleGame() {
     if (difficulty === '중') points = 250;
     if (difficulty === '상') points = 1000;
     
-    const prevScore = userScore;
     setIsNewRecord(false);
 
     // 1. 점수 및 히스토리 업데이트 (AuthContext 연동)
     await updateUserScore(points, difficulty || '하', time);
+
+    // 점수 업데이트 완료 후 리더보드 즉시 동기화 (레이스 컨디션 방지 및 guest 대응)
+    await fetchLeaderboard(userScore + points);
 
     // 2. 최고 기록 갱신 여부
     const currentDiff = difficulty || '하';
@@ -651,7 +1118,7 @@ export default function BlockPuzzleGame() {
     const fullyColoredGrid = finalGrid.map((row, rIdx) => 
       row.map((cell, cIdx) => {
         if (targetPattern[rIdx]?.[cIdx]) {
-          return cell || 'from-yellow-400 to-amber-500';
+          return cell || 'from-[#FFE082] to-[#FFD54F]';
         }
         return cell;
       })
@@ -663,7 +1130,7 @@ export default function BlockPuzzleGame() {
 
     setTimeout(() => {
       // 폭죽 이모지 파티클 생성
-      const emojis = ['🎉', '✨', '🎈', '🎇', '🍰', '🌸', '🍎', '🎁', '💫'];
+      const emojis = ['🎉', '✨', '🎈', '🎇', '🍰', '🌸', '🍎', '💫'];
       const newParticles = Array(30).fill(null).map((_, i) => ({
         id: i,
         emoji: emojis[Math.floor(Math.random() * emojis.length)],
@@ -685,17 +1152,15 @@ export default function BlockPuzzleGame() {
     const block = blockPool[index];
     if (!block) return;
 
-    const blockEl = e.currentTarget;
-    const rect = blockEl.getBoundingClientRect();
-    
-    const offsetX = e.clientX - rect.left;
-    const offsetY = e.clientY - rect.top;
+    // Center the block's visual representation exactly on the cursor/pointer
+    const offsetX = (block.width * 38) / 2;
+    const offsetY = (block.height * 38) / 2;
 
     setDraggedIdx(index);
     setDragOffset({ x: offsetX, y: offsetY });
     setDragPos({ x: e.clientX, y: e.clientY });
     
-    blockEl.setPointerCapture(e.pointerId);
+    e.currentTarget.setPointerCapture(e.pointerId);
   };
 
   const handlePointerMove = (e: React.PointerEvent<HTMLDivElement>, index: number) => {
@@ -789,219 +1254,207 @@ export default function BlockPuzzleGame() {
   };
 
   // ==========================================
-  // 7. Render Pages
+  // 7. Render Screen Contents
   // ==========================================
   
   // ------------------------------------------
-  // HOME SCREEN (With Top Header Profile Link)
+  // HOME SCREEN (BLOCK PUZZLE Main page)
   // ------------------------------------------
   const renderHomeScreen = () => {
     const top3 = [...players].sort((a, b) => b.score - a.score).slice(0, 3);
     
     return (
-      <div className="flex flex-col items-center justify-center min-h-screen py-10 px-4 animate-pop-in relative">
+      <div className="w-full max-w-4xl mx-auto px-4 flex flex-col items-center animate-pop-in">
         
-        {/* 상단 헤더 프로필 영역 */}
-        <div className="absolute top-6 right-6 z-30">
-          {user ? (
-            <div 
-              className="relative"
-              onMouseEnter={() => setShowProfilePopover(true)}
-              onMouseLeave={() => setShowProfilePopover(false)}
-            >
-              {/* 사용자 프로필 사진 (Google Avatar) */}
-              <button className="w-10 h-10 rounded-full border border-white/20 overflow-hidden cursor-pointer shadow-lg hover:border-indigo-400 transition-all flex items-center justify-center bg-zinc-800">
-                {user.user_metadata?.avatar_url ? (
-                  <img 
-                    src={user.user_metadata.avatar_url} 
-                    alt="avatar" 
-                    className="w-full h-full object-cover" 
-                  />
-                ) : (
-                  <span className="text-zinc-200 font-bold uppercase">{user.email?.[0]}</span>
-                )}
-              </button>
-              
-              {/* 호버 팝오버 Sign out */}
-              {showProfilePopover && (
-                <div className="absolute right-0 mt-1 w-32 bg-zinc-900 border border-zinc-850 p-2 rounded-xl shadow-xl animate-fade-in text-center flex flex-col items-center gap-1.5">
-                  <span className="text-[10px] text-zinc-400 truncate max-w-full font-bold">
-                    {user.email?.split('@')[0]}
-                  </span>
-                  <button
-                    onClick={() => signOut()}
-                    className="w-full py-1.5 text-xs font-extrabold bg-rose-950 hover:bg-rose-900 text-rose-300 rounded-lg cursor-pointer transition-colors border border-rose-900/40"
-                  >
-                    Sign out
-                  </button>
-                </div>
-              )}
+        {/* Responsive Grid layout containing My Record & Center Card */}
+        <div className="w-full grid grid-cols-1 lg:grid-cols-4 gap-8 items-start mt-4">
+          
+          {/* Left panel: My Record Card */}
+          <div className="lg:col-span-1 sky-panel p-5 rounded-2xl flex flex-col gap-4">
+            <div className="flex items-center gap-2 border-b border-slate-100 pb-2">
+              <svg className="w-5 h-5 text-slate-500" fill="none" stroke="currentColor" strokeWidth="2.5" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" d="M17.982 18.725A7.488 7.488 0 0012 15.75a7.488 7.488 0 00-5.982 2.975m11.963 0a9 9 0 10-11.963 0m11.963 0A8.966 8.966 0 0112 21c-2.17 0-4.207-.576-5.963-1.584A6.062 6.062 0 016 18.719m12 0a5.971 5.971 0 00-.941-3.197m0 0A5.995 5.995 0 0012 12.75a5.995 5.995 0 00-5.058 2.772m0 0a3 3 0 00-4.681 2.72 8.986 8.986 0 003.74.477m.94-3.197a5.971 5.971 0 00-.94-3.197M15 6.75a3 3 0 11-6 0 3 3 0 016 0zm6 3a2.25 2.25 0 11-4.5 0 2.25 2.25 0 014.5 0zm-13.5 0a2.25 2.25 0 11-4.5 0 2.25 2.25 0 014.5 0z" />
+              </svg>
+              <span className="text-xs text-slate-500 font-extrabold tracking-tight uppercase">My Record</span>
             </div>
-          ) : (
-            // 비로그인 상태 (게스트) 로그인 링크
-            <Link 
-              href="/auth"
-              className="px-4 py-2 bg-indigo-950 hover:bg-indigo-900 border border-indigo-900 text-indigo-300 hover:text-indigo-100 text-xs font-extrabold rounded-xl transition-all shadow-md"
-            >
-              로그인 🔑
-            </Link>
-          )}
-        </div>
+            
+            <div className="flex flex-col gap-4">
+              {/* Section 1: Game Stats */}
+              <div className="flex flex-col gap-2.5">
+                <div className="flex justify-between items-center bg-slate-50/50 p-2.5 rounded-xl border border-slate-100/50">
+                  <span className="text-xs text-slate-450 font-bold">Best Score</span>
+                  <span className="text-sm font-extrabold text-[#1e6068]">{userScore.toLocaleString()} pts</span>
+                </div>
+                <div className="flex justify-between items-center bg-slate-50/50 p-2.5 rounded-xl border border-slate-100/50">
+                  <span className="text-xs text-slate-450 font-bold">Global Rank</span>
+                  <span className="text-sm font-black text-slate-700">#{rank}</span>
+                </div>
+              </div>
 
-        {/* 내 기록 정보 */}
-        <div className="absolute top-6 left-6 flex flex-col gap-1 p-3 rounded-xl glass-panel shadow-lg border border-white/10">
-          <div className="text-[10px] text-zinc-400 font-bold uppercase tracking-wider flex items-center gap-1">
-            <span>나의 기록</span>
-            {isGuest ? (
-              <span className="bg-zinc-800 text-[9px] text-zinc-400 px-1.5 py-0.5 rounded-full border border-zinc-700 font-normal">게스트</span>
-            ) : (
-              <span className="bg-indigo-950 text-[9px] text-indigo-300 px-1.5 py-0.5 rounded-full border border-indigo-900/50 font-semibold">인증됨</span>
+              {/* Divider */}
+              <div className="h-[1px] bg-slate-100/80" />
+
+              {/* Section 2: My Items */}
+              <div className="flex flex-col gap-2">
+                <span className="text-[10px] text-slate-450 font-extrabold tracking-wider uppercase">My Items</span>
+                
+                <div className="flex flex-col gap-2">
+                  {/* Gold Item Row */}
+                  <div className="group relative flex justify-between items-center bg-amber-50/30 hover:bg-amber-50/60 border border-amber-100/40 hover:border-amber-200/60 px-3 py-2.5 rounded-xl transition-all cursor-help">
+                    <div className="flex items-center gap-1.5">
+                      <span className="text-base">🪙</span>
+                      <span className="text-xs text-slate-550 font-semibold">Gold</span>
+                    </div>
+                    <span className="text-xs font-black text-amber-600">{gold.toLocaleString()} Gold</span>
+                    
+                    {/* Tooltip */}
+                    <div className="absolute bottom-full left-1/2 transform -translate-x-1/2 mb-2 w-52 bg-slate-900/95 backdrop-blur-md text-white text-[11px] p-2.5 rounded-xl shadow-xl opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all duration-200 z-50 text-center border border-white/10 pointer-events-none scale-95 group-hover:scale-100 leading-normal">
+                      <span className="font-bold text-amber-300 block mb-0.5">🪙 골드 (Gold)</span>
+                      상점에서 유용한 인게임 아이템들을 구매할 때 사용하는 게임 재화입니다.
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-2">
+                    {/* Block Change Item card */}
+                    <div className="group relative flex flex-col items-center justify-center bg-slate-50/60 hover:bg-slate-100/80 border border-slate-100/80 hover:border-slate-200 px-2.5 py-3 rounded-xl transition-all cursor-help text-center">
+                      <span className="text-lg">🔄</span>
+                      <span className="text-[10px] text-slate-400 font-bold mt-1">블럭 변경</span>
+                      <span className="text-xs font-black text-slate-700 mt-1">{blockChanges}개</span>
+
+                      {/* Tooltip */}
+                      <div className="absolute bottom-full left-1/2 transform -translate-x-1/2 mb-2 w-52 bg-slate-900/95 backdrop-blur-md text-white text-[11px] p-2.5 rounded-xl shadow-xl opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all duration-200 z-50 text-center border border-white/10 pointer-events-none scale-95 group-hover:scale-100 leading-normal">
+                        <span className="font-bold text-[#AECFD4] block mb-0.5">🔄 블럭 변경</span>
+                        보유한 블록 중 하나를 선택해 다른 임의의 블록 모양으로 교체할 수 있습니다.
+                      </div>
+                    </div>
+
+                    {/* Hint Item card */}
+                    <div className="group relative flex flex-col items-center justify-center bg-slate-50/60 hover:bg-slate-100/80 border border-slate-100/80 hover:border-slate-200 px-2.5 py-3 rounded-xl transition-all cursor-help text-center">
+                      <span className="text-lg">💡</span>
+                      <span className="text-[10px] text-slate-400 font-bold mt-1">힌트 아이템</span>
+                      <span className="text-xs font-black text-slate-700 mt-1">{hints}개</span>
+
+                      {/* Tooltip */}
+                      <div className="absolute bottom-full left-1/2 transform -translate-x-1/2 mb-2 w-52 bg-slate-900/95 backdrop-blur-md text-white text-[11px] p-2.5 rounded-xl shadow-xl opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all duration-200 z-50 text-center border border-white/10 pointer-events-none scale-95 group-hover:scale-100 leading-normal">
+                        <span className="font-bold text-amber-300 block mb-0.5">💡 힌트 아이템</span>
+                        블록을 퍼즐판 내 어디에 배치해야 하는지 최적의 위치를 반짝임으로 표시해 줍니다.
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+            {isGuest && (
+              <div className="mt-2 text-[10px] text-amber-600 bg-amber-50 border border-amber-100 p-2 rounded-xl text-center leading-4">
+                게스트 플레이 중입니다.<br/>
+                <button onClick={() => setActiveTab('profile')} className="underline font-bold hover:text-amber-800 cursor-pointer">로그인</button>하여 기록을 영구 저장하세요!
+              </div>
             )}
           </div>
-          <div className="text-sm text-zinc-200">
-            내 점수: <span className="font-extrabold text-indigo-400">{userScore}점</span>
-          </div>
-          <div className="text-sm text-zinc-200">
-            내 등수: <span className="font-extrabold text-amber-400">{rank}위</span>
-          </div>
-        </div>
-
-        {/* 랭킹 판 */}
-        <div className="w-full max-w-md flex flex-col items-center gap-8 bg-zinc-900/50 p-8 rounded-3xl border border-zinc-800 shadow-2xl backdrop-blur-md">
-          <div className="text-center">
-            <h1 className="text-4xl font-black tracking-tight bg-gradient-to-r from-indigo-400 via-purple-400 to-pink-500 bg-clip-text text-transparent drop-shadow-sm">
-              BLOCK PUZZLE
-            </h1>
-            <p className="text-xs text-zinc-400 mt-2 font-medium">Gemini AI가 제공하는 정답 블록으로 형태를 다 맞춰보세요!</p>
-          </div>
-
-          {/* TOP 3 플레이어 */}
-          <div className="w-full">
-            <h2 className="text-lg font-bold text-center text-zinc-100 mb-4 flex items-center justify-center gap-2">
-              🏆 TOP 3 플레이어
-            </h2>
-            <div className="overflow-hidden rounded-2xl border border-zinc-800 bg-zinc-950/40">
-              <table className="w-full text-center border-collapse">
-                <thead>
-                  <tr className="bg-zinc-800/50 text-xs text-zinc-400 font-semibold border-b border-zinc-800">
-                    <th className="py-2.5 px-4">순위</th>
-                    <th className="py-2.5 px-4">이름</th>
-                    <th className="py-2.5 px-4">누적 점수</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {top3.map((player, idx) => {
-                    const rankMedal = idx === 0 ? '🥇' : idx === 1 ? '🥈' : '🥉';
-                    const rankColor = idx === 0 ? 'text-yellow-400 font-bold' : idx === 1 ? 'text-zinc-300' : 'text-amber-600';
-                    return (
-                      <tr key={idx} className="border-b border-zinc-900/50 text-sm text-zinc-300 hover:bg-zinc-800/20 transition-colors">
-                        <td className={`py-3 px-4 ${rankColor}`}>{rankMedal} {idx + 1}</td>
-                        <td className="py-3 px-4 font-medium truncate max-w-[120px]">{player.name}</td>
-                        <td className="py-3 px-4 font-bold text-indigo-300">{player.score}점</td>
-                      </tr>
-                    );
-                  })}
-                  {top3.length === 0 && (
-                    <tr>
-                      <td colSpan={3} className="py-6 text-sm text-zinc-500">등록된 플레이어가 없습니다.</td>
-                    </tr>
-                  )}
-                </tbody>
-              </table>
+          
+          {/* Middle panel: Main game card & title */}
+          <div className="lg:col-span-2 flex flex-col items-center gap-8 w-full">
+            
+            {/* Logo and taglines */}
+            <div className="text-center flex flex-col gap-2">
+              <h1 className="text-4xl font-extrabold tracking-tight text-[#1e3a47]">
+                BLOCK-PUZZLE
+              </h1>
+              <p className="text-sm text-slate-500">Clear the blocks, reveal the picture.</p>
             </div>
-          </div>
-
-          <button
-            onClick={() => setShowDiffModal(true)}
-            className="w-full py-4 bg-gradient-to-r from-indigo-500 via-purple-500 to-pink-500 text-white font-extrabold text-xl rounded-2xl shadow-lg hover:shadow-indigo-500/20 hover:scale-[1.03] active:scale-[0.98] transition-all cursor-pointer"
-          >
-            게임 시작 🕹️
-          </button>
-        </div>
-
-        {/* 난이도 선택 모달 */}
-        {showDiffModal && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-md">
-            <div className="relative w-full max-w-sm mx-4 bg-zinc-900 border border-zinc-800 rounded-3xl p-6 shadow-2xl animate-pop-in">
-              <button 
-                onClick={() => setShowDiffModal(false)}
-                className="absolute top-4 right-4 text-zinc-400 hover:text-white text-xl font-bold cursor-pointer w-8 h-8 flex items-center justify-center rounded-full bg-zinc-800/50 hover:bg-zinc-800 transition-colors"
+            
+            {/* TOP 3 Card */}
+            <div className="sky-panel w-full rounded-3xl overflow-hidden">
+              
+              {/* Card Header */}
+              <div className="px-6 py-4 flex items-center justify-between border-b border-slate-100">
+                <span className="text-sm font-bold text-slate-700 flex items-center gap-1.5">
+                  🏆 TOP 3 PLAYERS
+                </span>
+                <span className="text-[10px] font-black text-slate-400 tracking-wider">
+                  GLOBAL SEASON 4
+                </span>
+              </div>
+              
+              {/* Card List Rows */}
+              <div className="flex flex-col">
+                {top3.map((player, idx) => {
+                  const isGold = idx === 0;
+                  const rowBg = isGold ? 'bg-[#F8F3E6]' : 'bg-white';
+                  const badgeBg = isGold ? 'bg-[#4a453f] text-white' : 'bg-[#DCECF3] text-[#1e3a47]';
+                  const division = getDivisionName(player.score);
+                  
+                  return (
+                    <div 
+                      key={idx} 
+                      className={`flex items-center justify-between px-6 py-4 border-b border-slate-100/60 ${rowBg} transition-colors`}
+                    >
+                      <div className="flex items-center gap-4">
+                        {/* Rank Badge */}
+                        <div className={`w-8 h-8 rounded-full flex items-center justify-center font-bold text-sm shadow-sm ${badgeBg}`}>
+                          {idx + 1}
+                        </div>
+                        {/* Player name & division */}
+                        <div className="flex flex-col">
+                          <span className="text-sm font-bold text-slate-800 truncate max-w-[150px]">{player.name}</span>
+                          <span className="text-[10px] text-slate-400 font-semibold">{division}</span>
+                        </div>
+                      </div>
+                      
+                      {/* Score display */}
+                      <div className="text-right flex flex-col">
+                        <span className="text-sm font-black text-slate-800">{player.score.toLocaleString()}</span>
+                        <span className="text-[9px] text-slate-400 font-extrabold tracking-tight">SCORE</span>
+                      </div>
+                    </div>
+                  );
+                })}
+                {top3.length === 0 && (
+                  <div className="py-12 text-center text-sm text-slate-400">등록된 랭커가 없습니다.</div>
+                )}
+              </div>
+              
+              {/* View all Rankings footer link */}
+              <div className="bg-slate-50/50 py-3 text-center border-t border-slate-100">
+                <button 
+                  onClick={() => setActiveTab('leaderboard')}
+                  className="text-xs font-bold text-[#1e6068] hover:underline cursor-pointer"
+                >
+                  View All Rankings
+                </button>
+              </div>
+            </div>
+            
+            {/* Start Game & Shop Buttons */}
+            <div className="w-full flex flex-col items-center gap-3">
+              <button
+                onClick={() => {
+                  setSelectedShopItem(null);
+                  setShopMessage(null);
+                  setShowShopModal(true);
+                }}
+                className="w-full py-4.5 bg-gradient-to-r from-[#FFF3CD] to-[#FFEAA7] hover:from-[#FFE699] hover:to-[#FFD369] text-[#856404] font-black text-xl rounded-2xl shadow-[0_8px_25px_-4px_rgba(255,243,205,0.5)] hover:scale-[1.02] active:scale-[0.98] transition-all cursor-pointer flex items-center justify-center gap-2 border border-[#FFEBAA]"
               >
-                ✕
+                <span>🛒</span> 상점 (Shop)
               </button>
-
-              <h2 className="text-2xl font-black text-center text-zinc-100 mb-6 bg-gradient-to-r from-indigo-400 to-cyan-400 bg-clip-text text-transparent">
-                난이도를 선택하세요
-              </h2>
-
-              <div className="flex flex-col gap-4">
-                <button
-                  onClick={() => startGame('하')}
-                  className="flex flex-col items-center justify-center p-4 bg-zinc-800/40 hover:bg-emerald-950/20 border border-zinc-800 hover:border-emerald-500/50 rounded-2xl transition-all group cursor-pointer text-center"
-                >
-                  <span className="text-emerald-400 font-extrabold text-lg group-hover:scale-105 transition-transform">하 (100점)</span>
-                  <span className="text-xs text-zinc-400 mt-1">5x5 그리드 • 아기자기한 기본 난이도</span>
-                  <span className="text-[11px] text-indigo-400 font-semibold mt-1">
-                    최고 기록: {bestTimes['하'] ? formatTime(bestTimes['하']!) : '기록 없음'}
-                  </span>
-                </button>
-
-                <button
-                  onClick={() => startGame('중')}
-                  className="flex flex-col items-center justify-center p-4 bg-zinc-800/40 hover:bg-amber-950/20 border border-zinc-800 hover:border-amber-500/50 rounded-2xl transition-all group cursor-pointer text-center"
-                >
-                  <span className="text-amber-400 font-extrabold text-lg group-hover:scale-105 transition-transform">중 (250점)</span>
-                  <span className="text-xs text-zinc-400 mt-1">7x7 그리드 • 집중이 필요한 중급 퍼즐</span>
-                  <span className="text-[11px] text-indigo-400 font-semibold mt-1">
-                    최고 기록: {bestTimes['중'] ? formatTime(bestTimes['중']!) : '기록 없음'}
-                  </span>
-                </button>
-
-                <button
-                  onClick={() => startGame('상')}
-                  className="flex flex-col items-center justify-center p-4 bg-zinc-800/40 hover:bg-rose-950/20 border border-zinc-800 hover:border-rose-500/50 rounded-2xl transition-all group cursor-pointer text-center"
-                >
-                  <span className="text-rose-400 font-extrabold text-lg group-hover:scale-105 transition-transform">상 (1000점)</span>
-                  <span className="text-[10px] text-rose-300 font-extrabold mt-0.5">가장 복잡한 퍼즐에 도전하세요!</span>
-                  <span className="text-xs text-zinc-400 mt-1">10x10 그리드 • 극한의 두뇌 회전 고난도</span>
-                  <span className="text-[11px] text-indigo-400 font-semibold mt-1">
-                    최고 기록: {bestTimes['상'] ? formatTime(bestTimes['상']!) : '기록 없음'}
-                  </span>
-                </button>
-              </div>
+              <button
+                onClick={() => setShowDiffModal(true)}
+                className="w-full py-4.5 bg-[#AECFD4] hover:bg-[#96c4c9] text-[#1e3a47] font-black text-xl rounded-2xl shadow-[0_8px_25px_-4px_rgba(174,207,212,0.5)] hover:scale-[1.02] active:scale-[0.98] transition-all cursor-pointer flex items-center justify-center gap-2"
+              >
+                <span>▷</span> Start Game
+              </button>
+              <span className="text-[10px] text-slate-400 font-semibold uppercase tracking-wider">
+                5 energy required to play
+              </span>
             </div>
+            
           </div>
-        )}
-
-        {/* 게스트 스코어 마이그레이션 팝업 모달 */}
-        {pendingMigrationScore !== null && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-md">
-            <div className="relative w-full max-w-sm mx-4 bg-zinc-900 border border-zinc-800 rounded-3xl p-6 shadow-2xl animate-pop-in text-center flex flex-col gap-5">
-              <span className="text-4xl animate-bounce">⚡</span>
-              <h3 className="text-xl font-black text-indigo-400">게스트 점수 이전 알림</h3>
-              <p className="text-sm text-zinc-300 leading-6">
-                인증 로그인 이전에 게스트 모드로 플레이하여 누적된 점수{' '}
-                <span className="font-extrabold text-indigo-300">{pendingMigrationScore}점</span>이 감지되었습니다. 
-                이 점수를 현재 가입된 계정으로 이전하시겠습니까?
-              </p>
-              <div className="flex gap-3 mt-2">
-                <button
-                  onClick={() => migrateGuestScore(false)}
-                  className="flex-1 py-3 bg-zinc-850 hover:bg-zinc-800 text-zinc-400 hover:text-zinc-200 font-bold text-xs rounded-xl cursor-pointer transition-colors border border-zinc-800"
-                >
-                  아니오 (삭제)
-                </button>
-                <button
-                  onClick={() => migrateGuestScore(true)}
-                  className="flex-1 py-3 bg-gradient-to-r from-indigo-500 to-purple-600 text-white font-extrabold text-xs rounded-xl shadow-md cursor-pointer hover:scale-[1.02] active:scale-[0.98] transition-all"
-                >
-                  예 (합산 이전)
-                </button>
-              </div>
-            </div>
-          </div>
-        )}
-
+          
+          {/* Right spacer for centering */}
+          <div className="hidden lg:block lg:col-span-1" />
+          
+        </div>
+        
       </div>
     );
   };
@@ -1010,14 +1463,13 @@ export default function BlockPuzzleGame() {
   // PLAYING SCREEN
   // ------------------------------------------
   const renderPlayingScreen = () => {
-    // 1. AI 블록 설계 중 로딩 뷰
     if (aiGenerating) {
       return (
-        <div className="min-h-screen flex flex-col items-center justify-center bg-zinc-950 text-zinc-100 gap-4">
-          <div className="w-12 h-12 border-4 border-indigo-500 border-t-transparent rounded-full animate-spin"></div>
-          <div className="text-center flex flex-col gap-1">
-            <p className="text-base font-black text-indigo-400">Gemini AI가 블록을 조각하는 중...</p>
-            <p className="text-xs text-zinc-500">목표 틀을 완전히 채울 수 있는 최적의 정답 블록 세트를 생성하고 있습니다.</p>
+        <div className="min-h-[60vh] flex flex-col items-center justify-center gap-5 text-center animate-pop-in">
+          <div className="w-10 h-10 border-4 border-[#AECFD4] border-t-transparent rounded-full animate-spin"></div>
+          <div className="flex flex-col gap-1">
+            <p className="text-base font-extrabold text-[#1e3a47]">Gemini AI가 블록을 조각하는 중...</p>
+            <p className="text-xs text-slate-400 max-w-xs leading-5">목표 틀을 완벽하게 채울 수 있는 최적의 블록을 생성하고 있습니다.</p>
           </div>
         </div>
       );
@@ -1025,166 +1477,252 @@ export default function BlockPuzzleGame() {
 
     const remainingTargetCells = getRemainingTargetCellsCount();
     const remainingBlocksTotal = getRemainingBlocksTotalCount();
+    const shapeIcon = targetShapeName === '사과' ? '🍎' : targetShapeName === '꽃' ? '🌸' : '🍰';
+    const shapeDisplayName = targetShapeName === '사과' ? 'Apple Orchard' : targetShapeName === '꽃' ? 'Floral Garden' : 'Sweet Dessert';
+
+    let targetCellCount = 0;
+    targetPattern.forEach(row => {
+      row.forEach(val => {
+        if (val) targetCellCount++;
+      });
+    });
 
     return (
-      <div className="flex flex-col items-center justify-between min-h-screen py-6 px-4 select-none relative overflow-hidden">
+      <div className="w-full max-w-xl mx-auto flex flex-col items-center gap-4 animate-pop-in select-none">
         
-        {/* 상단바 */}
-        <div className="w-full max-w-lg flex items-center justify-between bg-zinc-900/60 backdrop-blur-md px-6 py-4 rounded-2xl border border-zinc-800 shadow-lg mb-4">
-          <div className="flex flex-col">
-            <span className="text-[10px] text-zinc-400 font-bold uppercase tracking-wider">목표 그림</span>
-            <span className="text-base font-black text-indigo-400 flex items-center gap-1.5">
-              {targetShapeName === '사과' ? '🍎' : targetShapeName === '꽃' ? '🌸' : '🍰'} {targetShapeName}
-            </span>
-          </div>
-          <div className="flex flex-col items-end">
-            <span className="text-[10px] text-zinc-400 font-bold uppercase tracking-wider">남은 채울 칸 / 남은 정답 블록</span>
-            <span className="text-sm font-black text-rose-400 animate-pulse mt-0.5">
-              빈 칸: {remainingTargetCells}개 • 남은 블록: {remainingBlocksTotal}개
-            </span>
-          </div>
-        </div>
-
-        {/* 격자판 & 가이드 */}
-        <div className="flex flex-col items-center justify-center flex-1 my-2">
-          
-          <div className="mb-4 flex flex-col items-center bg-zinc-950/80 p-2.5 rounded-xl border border-zinc-800 shadow-inner">
-            <span className="text-[10px] text-zinc-400 font-semibold mb-1">완성해야 할 목표 형태 가이드</span>
-            <div 
-              className="grid gap-[2px]"
-              style={{ gridTemplateColumns: `repeat(${gridSize}, minmax(0, 1fr))` }}
-            >
-              {targetPattern.map((row, r) => 
-                row.map((val, c) => (
-                  <div 
-                    key={`${r}-${c}`}
-                    className={`w-3 h-3 rounded-[2px] transition-colors ${
-                      val 
-                        ? (targetShapeName === '사과' ? 'bg-red-500/80' : targetShapeName === '꽃' ? 'bg-pink-400/80' : 'bg-yellow-400/80') 
-                        : 'bg-zinc-850'
-                    }`}
-                  />
-                ))
-              )}
-            </div>
-          </div>
-
-          <div 
-            ref={gridRef}
-            className={`relative p-3 bg-zinc-950 rounded-3xl border border-zinc-800 shadow-2xl transition-all duration-500 overflow-hidden ${
-              clearedAnimation ? 'animate-pulse-gold scale-105 z-10' : ''
-            }`}
-          >
-            {clearedAnimation && <div className="absolute inset-0 bg-shine pointer-events-none z-10" />}
-
-            <div 
-              className="grid gap-1.5"
-              style={{ 
-                gridTemplateColumns: `repeat(${gridSize}, minmax(0, 1fr))`,
-                width: gridSize === 5 ? '320px' : gridSize === 7 ? '350px' : '380px',
-                height: gridSize === 5 ? '320px' : gridSize === 7 ? '350px' : '380px'
-              }}
-            >
-              {grid.map((row, rIdx) => 
-                row.map((cellColor, cIdx) => {
-                  const isTarget = targetPattern[rIdx]?.[cIdx];
-                  const hasColor = cellColor !== null;
-                  
-                  let isPreviewActive = false;
-                  let previewColor = '';
-                  if (previewCell && draggedIdx !== null) {
-                    const block = blockPool[draggedIdx];
-                    if (block) {
-                      const pr = rIdx - previewCell.r;
-                      const pc = cIdx - previewCell.c;
-                      if (pr >= 0 && pr < block.shape.length && pc >= 0 && pc < block.shape[0].length) {
-                        if (block.shape[pr][pc] === 1) {
-                          isPreviewActive = true;
-                          previewColor = block.color;
-                        }
-                      }
-                    }
-                  }
-
-                  return (
+        {/* Top Objective Bar containing name, preview, and remaining */}
+        <div className="w-full sky-panel rounded-2xl px-5 py-3 flex items-center justify-between gap-4">
+          <div className="flex items-center gap-4">
+            {/* Thematic preview grid instead of static emoji */}
+            <div className="bg-slate-50 p-1.5 rounded-lg border border-slate-100/60 shrink-0">
+              <div 
+                className="grid gap-[1px]"
+                style={{ gridTemplateColumns: `repeat(${gridSize}, minmax(0, 1fr))` }}
+              >
+                {targetPattern.map((row, r) => 
+                  row.map((val, c) => (
                     <div 
-                      key={`${rIdx}-${cIdx}`}
-                      className={`relative rounded-lg aspect-square flex items-center justify-center transition-all ${
-                        hasColor 
-                          ? `bg-gradient-to-br ${cellColor} shadow-inner shadow-black/20 border border-white/10` 
-                          : isPreviewActive
-                            ? `bg-gradient-to-br ${previewColor} opacity-50 scale-95 border-2 border-white/30`
-                            : isTarget
-                              ? 'bg-zinc-850 hover:bg-zinc-800/80 border border-zinc-700/50 cursor-pointer shadow-inner'
-                              : 'bg-zinc-900 border border-zinc-950 cursor-pointer'
+                      key={`${r}-${c}`}
+                      className={`w-[6px] h-[6px] rounded-[1px] transition-colors ${
+                        val 
+                          ? 'bg-[#FED650] shadow-sm' 
+                          : 'bg-slate-200/50'
                       }`}
-                    >
-                      {isTarget && !hasColor && !isPreviewActive && (
-                        <div className="absolute w-1.5 h-1.5 rounded-full bg-zinc-600/50" />
-                      )}
-                    </div>
-                  );
-                })
-              )}
+                    />
+                  ))
+                )}
+              </div>
+            </div>
+            
+            <div className="flex flex-col gap-0.5">
+              <span className="text-[10px] text-slate-400 font-bold uppercase tracking-wider">Target Objective</span>
+              <span className="text-sm font-extrabold text-[#1e3a47] flex items-center gap-1.5">
+                <span>{shapeIcon}</span> {shapeDisplayName}
+              </span>
+            </div>
+          </div>
+          
+          <div className="flex items-center gap-3">
+            {/* 뒤로가기 (Undo) 버튼 */}
+            <button
+              onClick={undoLastMove}
+              disabled={history.length === 0 || clearedAnimation}
+              className={`px-3 py-1.5 rounded-xl transition-all flex items-center gap-1 font-bold text-xs select-none ${
+                history.length === 0 || clearedAnimation
+                  ? 'bg-slate-100 text-slate-300 border border-slate-200/30 cursor-not-allowed'
+                  : 'bg-slate-50 hover:bg-slate-100 text-slate-600 hover:text-slate-800 border border-slate-200 cursor-pointer shadow-sm active:scale-95'
+              }`}
+              title="이전 수 실행 취소"
+            >
+              <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth="2.5" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" d="M9 15L3 9m0 0l6-6M3 9h12a6 6 0 010 12h-3" />
+              </svg>
+              뒤로가기
+            </button>
+
+            <div className="text-right flex flex-col gap-0.5">
+              <span className="text-[10px] text-slate-400 font-bold uppercase tracking-wider">Remaining</span>
+              <span className="text-base font-black text-rose-500 animate-pulse bg-rose-50 px-2.5 py-0.5 rounded-lg border border-rose-100/40">
+                {remainingTargetCells} / {targetCellCount}
+              </span>
             </div>
           </div>
         </div>
 
-        {/* 경고 알림 */}
-        {warningMessage && (
-          <div className="absolute bottom-40 bg-red-500/95 text-white font-extrabold text-xs px-5 py-2.5 rounded-full shadow-lg border border-red-400/30 animate-bounce z-40 backdrop-blur-sm">
-            ⚠️ {warningMessage}
+        {/* Hint Banner message */}
+        {(hintSelectMode || hintTimer !== null) && (
+          <div className="w-full bg-amber-50 border border-amber-200 text-[#7a5c00] text-xs font-bold py-2.5 px-4 rounded-xl flex items-center justify-between shadow-sm animate-pop-in mb-3">
+            <div className="flex items-center gap-1.5">
+              <span className="text-sm animate-bounce">💡</span>
+              <span>
+                {hintSelectMode 
+                  ? '힌트를 받을 블록을 아래에서 선택하세요.' 
+                  : `힌트 표시 중... ${hintTimer}초`}
+              </span>
+            </div>
+            {hintTimer !== null && (
+              <span className="font-extrabold px-2 py-0.5 bg-amber-200/60 rounded text-[10px]">
+                {hintTimer}s
+              </span>
+            )}
           </div>
         )}
 
-        {/* 제시되는 블록 (3개 풀) */}
-        <div className="w-full max-w-lg bg-zinc-900/50 border border-zinc-800 p-4 rounded-3xl shadow-inner mb-6">
-          <div className="text-center text-[10px] text-zinc-400 font-bold mb-3 uppercase tracking-wider">
-            👉 블록을 클릭한 상태로 격자판에 드래그 앤 드롭 하세요! (마지막에 남은 블록이 0개여야 완료됩니다)
+        {/* Main Grid */}
+        <div 
+          ref={gridRef}
+          className={`relative p-3 bg-white rounded-3xl border border-slate-100 shadow-xl transition-all duration-500 overflow-hidden ${
+            clearedAnimation ? 'animate-pulse-gold scale-105 z-10' : ''
+          }`}
+        >
+          {clearedAnimation && <div className="absolute inset-0 bg-shine pointer-events-none z-10" />}
+
+          <div 
+            className="grid gap-1.5"
+            style={{ 
+              gridTemplateColumns: `repeat(${gridSize}, minmax(0, 1fr))`,
+              width: gridSize === 5 ? '280px' : gridSize === 7 ? '310px' : '340px',
+              height: gridSize === 5 ? '280px' : gridSize === 7 ? '310px' : '340px'
+            }}
+          >
+            {grid.map((row, rIdx) => 
+              row.map((cellColor, cIdx) => {
+                const isTarget = targetPattern[rIdx]?.[cIdx];
+                const hasColor = cellColor !== null;
+                
+                let isPreviewActive = false;
+                let previewColor = '';
+                if (previewCell && draggedIdx !== null) {
+                  const block = blockPool[draggedIdx];
+                  if (block) {
+                    const pr = rIdx - previewCell.r;
+                    const pc = cIdx - previewCell.c;
+                    if (pr >= 0 && pr < block.shape.length && pc >= 0 && pc < block.shape[0].length) {
+                      if (block.shape[pr][pc] === 1) {
+                        isPreviewActive = true;
+                        previewColor = block.color;
+                      }
+                    }
+                  }
+                }
+
+                let isHintActive = hintHighlightCells.some(cell => cell.r === rIdx && cell.c === cIdx);
+
+                // Grid cell class configurations
+                let cellClasses = 'relative rounded-lg aspect-square flex items-center justify-center transition-all bg-white ';
+                if (hasColor) {
+                  cellClasses += `bg-gradient-to-br ${cellColor} shadow-sm border border-white/40`;
+                } else if (isPreviewActive) {
+                  cellClasses += `bg-gradient-to-br ${previewColor} opacity-50 scale-95 border border-white/20`;
+                } else if (isHintActive) {
+                  cellClasses += hintFadeOut ? 'hint-fade-out ' : 'hint-highlight-cell ';
+                } else if (isTarget) {
+                  cellClasses += 'border border-slate-200 shadow-inner dot-marker';
+                } else {
+                  cellClasses += 'border border-slate-100/80 dot-marker';
+                }
+
+                return (
+                  <div 
+                    key={`${rIdx}-${cIdx}`}
+                    className={cellClasses}
+                  />
+                );
+              })
+            )}
           </div>
-          <div className="flex justify-around items-center gap-4">
+        </div>
+
+        {/* Warning notification */}
+        {warningMessage && (
+          <div className="fixed bottom-24 bg-rose-50 border border-rose-100 text-rose-600 font-extrabold text-xs px-5 py-3 rounded-xl shadow-lg animate-bounce z-50 flex items-center gap-1.5">
+            <span>⚠️</span> {warningMessage}
+          </div>
+        )}
+
+        {/* Drag pieces panel */}
+        <div className="w-full sky-panel p-3.5 rounded-3xl flex flex-col gap-2">
+          <div className="flex items-center justify-center gap-1.5 text-[10px] text-slate-400 font-bold uppercase tracking-wider">
+            <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth="2.5" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" d="M3.75 3.75v4.5m0-4.5h4.5m-4.5 0L9 9M3.75 20.25v-4.5m0 4.5h4.5m-4.5 0L9 15M20.25 3.75v4.5m0-4.5h-4.5m4.5 0L15 9m5.25 11.25v-4.5m0 4.5h-4.5m4.5 0L15 15" />
+            </svg>
+            Drag pieces to the grid
+          </div>
+          
+          <div className="flex justify-around items-center gap-4 mt-1">
             {blockPool.map((block, idx) => {
               if (!block) {
                 return (
                   <div 
                     key={`empty-${idx}`}
-                    className="flex items-center justify-center p-3 rounded-2xl bg-zinc-950/20 border border-zinc-900/50 border-dashed"
-                    style={{ width: '100px', height: '100px' }}
+                    className="flex items-center justify-center rounded-2xl bg-slate-50 border border-slate-100 border-dashed"
+                    style={{ width: '80px', height: '80px' }}
                   >
-                    <span className="text-[10px] text-zinc-600 font-extrabold uppercase">소진됨</span>
+                    <span className="text-[10px] text-slate-300 font-bold tracking-wider uppercase">Empty</span>
                   </div>
                 );
               }
 
               const isDragged = draggedIdx === idx;
 
+              const isSelectedForHint = selectedHintBlockIdx === idx;
+              const isBlockChangeMode = usingItem === 'blockchange';
+              const pulseClass = hintSelectMode 
+                ? 'animate-hint-pulse border-2 border-amber-400 bg-amber-50/50 cursor-pointer scale-102 shadow-md' 
+                : isBlockChangeMode
+                ? 'animate-hint-pulse border-2 border-rose-400 bg-rose-50/50 cursor-pointer scale-102 shadow-md'
+                : '';
+              const outlineStyle = isSelectedForHint ? { outline: '2px solid #FFD700', outlineOffset: '2px' } : {};
+
               return (
                 <div 
                   key={block.id}
-                  onPointerDown={(e) => handlePointerDown(e, idx)}
-                  onPointerMove={(e) => handlePointerMove(e, idx)}
-                  onPointerUp={(e) => handlePointerUp(e, idx)}
-                  className={`touch-none flex items-center justify-center p-3 rounded-2xl transition-all cursor-grab active:cursor-grabbing ${
-                    isDragged ? 'opacity-30 bg-zinc-800/30' : 'bg-zinc-950/80 hover:bg-zinc-950 border border-zinc-800 hover:border-zinc-700/60 shadow-lg'
-                  }`}
-                  style={{
-                    width: '100px',
-                    height: '100px',
+                  onPointerDown={(e) => {
+                    if (usingItem || hintSelectMode) return;
+                    handlePointerDown(e, idx);
                   }}
+                  onPointerMove={(e) => {
+                    if (usingItem || hintSelectMode) return;
+                    handlePointerMove(e, idx);
+                  }}
+                  onPointerUp={(e) => {
+                    if (usingItem || hintSelectMode) return;
+                    handlePointerUp(e, idx);
+                  }}
+                  onClick={() => {
+                    if (hintSelectMode) {
+                      handleBlockPoolSlotClickForHint(idx);
+                    } else if (usingItem === 'blockchange') {
+                      handleBlockPoolSlotClick(idx);
+                    }
+                  }}
+                  className={`touch-none relative flex items-center justify-center p-2 rounded-2xl transition-all ${
+                    pulseClass || (isDragged ? 'opacity-20 bg-slate-150/40' : 'bg-slate-50 hover:bg-slate-100/80 border border-slate-200/60 shadow-sm cursor-grab active:cursor-grabbing')
+                  }`}
+                  style={{ width: '85px', height: '85px', ...outlineStyle }}
                 >
+                  {/* "선택하세요" overlay for hint selection */}
+                  {hintSelectMode && (
+                    <div className="absolute inset-0 bg-amber-400/10 rounded-2xl flex items-center justify-center z-20">
+                      <span className="text-[9px] font-black text-amber-600 bg-white px-1.5 py-0.5 rounded-md shadow-sm uppercase animate-pulse">선택하세요</span>
+                    </div>
+                  )}
+                  {isBlockChangeMode && (
+                    <div className="absolute inset-0 bg-rose-400/10 rounded-2xl flex items-center justify-center z-20">
+                      <span className="text-[9px] font-black text-rose-600 bg-white px-1.5 py-0.5 rounded-md shadow-sm uppercase animate-pulse">선택하세요</span>
+                    </div>
+                  )}
                   <div 
                     className="grid gap-[2px]"
-                    style={{
-                      gridTemplateColumns: `repeat(${block.shape[0].length}, minmax(0, 1fr))`,
-                    }}
+                    style={{ gridTemplateColumns: `repeat(${block.shape[0].length}, minmax(0, 1fr))` }}
                   >
                     {block.shape.map((row, r) => 
                       row.map((cell, c) => (
                         <div 
                           key={`${r}-${c}`}
-                          className={`w-4 h-4 rounded-[3px] ${
+                          className={`w-3.5 h-3.5 rounded-[3px] ${
                             cell === 1 
-                              ? `bg-gradient-to-br ${block.color} border border-white/10` 
+                              ? `bg-gradient-to-br ${block.color} border border-white/20 shadow-sm` 
                               : 'bg-transparent'
                           }`}
                         />
@@ -1197,44 +1735,72 @@ export default function BlockPuzzleGame() {
           </div>
         </div>
 
-        {/* 드래그 렌더링 */}
-        {draggedIdx !== null && blockPool[draggedIdx] && (
-          <div 
-            className="fixed pointer-events-none z-50 transform -translate-x-[20px] -translate-y-[20px] drop-shadow-2xl"
-            style={{
-              left: `${dragPos.x - dragOffset.x}px`,
-              top: `${dragPos.y - dragOffset.y}px`,
-              width: `${blockPool[draggedIdx]!.width * 38}px`,
-              height: `${blockPool[draggedIdx]!.height * 38}px`
-            }}
-          >
-            <div 
-              className="grid gap-1 scale-[1.05]"
-              style={{
-                gridTemplateColumns: `repeat(${blockPool[draggedIdx]!.shape[0].length}, minmax(0, 1fr))`
-              }}
-            >
-              {blockPool[draggedIdx]!.shape.map((row, r) => 
-                row.map((cell, c) => (
-                  <div 
-                    key={`${r}-${c}`}
-                    className={`w-8 h-8 rounded-lg transition-all ${
-                      cell === 1 
-                        ? `bg-gradient-to-br ${blockPool[draggedIdx]!.color} border border-white/20 opacity-90` 
-                        : 'bg-transparent'
-                    }`}
-                  />
-                ))
-              )}
+        {/* Item usage slots container */}
+        <div className="w-full sky-panel p-3 rounded-3xl flex justify-between items-center gap-4">
+          {/* Block change item */}
+          <div className="group relative flex-1 bg-slate-50 border border-slate-200/50 p-3 rounded-2xl flex items-center justify-between transition-all">
+            <div className="flex items-center gap-2 cursor-help">
+              <span className="text-xl">🔄</span>
+              <div className="flex flex-col">
+                <span className="text-xs font-bold text-slate-700">블럭 변경</span>
+                <span className="text-[10px] text-slate-400 font-semibold">보유: {blockChanges}개</span>
+              </div>
             </div>
-          </div>
-        )}
 
-        {/* 하단바 */}
-        <div className="w-full max-w-lg flex items-center justify-between border-t border-zinc-800/80 pt-4">
-          <div className="flex items-center gap-2 bg-zinc-900/60 px-4 py-2 rounded-xl border border-zinc-800 shadow-inner">
-            <span className="text-zinc-400 text-[10px] font-bold uppercase">⏱️ 플레이 시간</span>
-            <span className="text-zinc-200 font-extrabold text-sm tabular-nums">
+            {/* Tooltip */}
+            <div className="absolute bottom-full left-1/2 transform -translate-x-1/2 mb-2.5 w-56 bg-slate-900/95 backdrop-blur-md text-white text-[11px] p-2.5 rounded-xl shadow-xl opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all duration-200 z-50 text-center border border-white/10 pointer-events-none scale-95 group-hover:scale-100 leading-normal font-medium">
+              <span className="font-bold text-[#AECFD4] block mb-0.5">🔄 블럭 변경 아이템</span>
+              원하지 않는 모양의 블록을 선택해 다른 임의의 템플릿 블록으로 변경하여 퍼즐을 쉽게 풀 수 있습니다.
+            </div>
+
+            <button
+              onClick={triggerBlockChangeUsage}
+              disabled={aiGenerating || clearedAnimation}
+              className={`px-3 py-1.5 font-black text-xs rounded-xl shadow-sm cursor-pointer transition-all ${
+                usingItem === 'blockchange'
+                  ? 'bg-rose-500 hover:bg-rose-600 text-white animate-pulse'
+                  : 'bg-[#AECFD4] hover:bg-[#96c4c9] text-[#1e3a47] disabled:bg-slate-200 disabled:text-slate-400 disabled:cursor-not-allowed'
+              }`}
+            >
+              {usingItem === 'blockchange' ? '취소' : '사용'}
+            </button>
+          </div>
+
+          {/* Hint item */}
+          <div className="group relative flex-1 bg-slate-50 border border-slate-200/50 p-3 rounded-2xl flex items-center justify-between transition-all">
+            <div className="flex items-center gap-2 cursor-help">
+              <span className="text-xl">💡</span>
+              <div className="flex flex-col">
+                <span className="text-xs font-bold text-slate-700">힌트 아이템</span>
+                <span className="text-[10px] text-slate-400 font-semibold">보유: {hints}개</span>
+              </div>
+            </div>
+
+            {/* Tooltip */}
+            <div className="absolute bottom-full left-1/2 transform -translate-x-1/2 mb-2.5 w-56 bg-slate-900/95 backdrop-blur-md text-white text-[11px] p-2.5 rounded-xl shadow-xl opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all duration-200 z-50 text-center border border-white/10 pointer-events-none scale-95 group-hover:scale-100 leading-normal font-medium">
+              <span className="font-bold text-amber-300 block mb-0.5">💡 힌트 아이템</span>
+              선택한 블록을 배치할 수 있는 올바른 그리드 영역을 반짝임 표시로 일정 시간 동안 알려줍니다.
+            </div>
+
+            <button
+              onClick={triggerHintUsage}
+              disabled={aiGenerating || clearedAnimation}
+              className={`px-3 py-1.5 font-black text-xs rounded-xl shadow-sm cursor-pointer transition-all ${
+                usingItem === 'hint'
+                  ? 'bg-rose-500 hover:bg-rose-600 text-white animate-pulse'
+                  : 'bg-[#AECFD4] hover:bg-[#96c4c9] text-[#1e3a47] disabled:bg-slate-200 disabled:text-slate-400 disabled:cursor-not-allowed'
+              }`}
+            >
+              {usingItem === 'hint' ? '취소' : '사용'}
+            </button>
+          </div>
+        </div>
+
+        {/* Control actions footer */}
+        <div className="w-full flex items-center justify-between border-t border-slate-100 pt-4">
+          <div className="flex items-center gap-2 bg-white px-4 py-2 rounded-xl border border-slate-100 shadow-sm">
+            <span className="text-slate-400 text-[10px] font-bold uppercase">⏱️ Time</span>
+            <span className="text-slate-700 font-extrabold text-xs tabular-nums">
               {formatTime(time)}
             </span>
           </div>
@@ -1242,15 +1808,15 @@ export default function BlockPuzzleGame() {
           <div className="flex gap-2">
             <button
               onClick={restartGame}
-              className="px-4 py-2 bg-zinc-800 hover:bg-zinc-700 text-zinc-200 hover:text-white text-xs font-extrabold rounded-xl transition-all cursor-pointer border border-zinc-750"
+              className="px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold rounded-xl transition-all cursor-pointer border border-slate-200 flex items-center gap-1"
             >
-              다시하기 🔄
+              <span>↻</span> Restart
             </button>
             <button
               onClick={quitGame}
-              className="px-4 py-2 bg-rose-950 hover:bg-rose-900 text-rose-300 hover:text-rose-100 text-xs font-extrabold rounded-xl transition-all cursor-pointer border border-rose-900/50"
+              className="px-4 py-2 bg-[#b31e13] hover:bg-[#991a10] text-white text-xs font-bold rounded-xl transition-all cursor-pointer flex items-center gap-1"
             >
-              그만하기 🚪
+              <span>🚪</span> Quit
             </button>
           </div>
         </div>
@@ -1266,8 +1832,9 @@ export default function BlockPuzzleGame() {
     const acquired = difficulty === '하' ? 100 : difficulty === '중' ? 250 : 1000;
 
     return (
-      <div className="flex flex-col items-center justify-center min-h-screen py-10 px-4 select-none relative overflow-hidden">
+      <div className="w-full max-w-md mx-auto py-6 flex flex-col items-center select-none relative overflow-hidden animate-pop-in">
         
+        {/* Confetti particles */}
         {particles.map(p => (
           <div
             key={p.id}
@@ -1282,45 +1849,80 @@ export default function BlockPuzzleGame() {
           </div>
         ))}
 
-        <div className="w-full max-w-md bg-zinc-900/70 p-8 rounded-3xl border border-zinc-800 shadow-2xl backdrop-blur-md flex flex-col items-center gap-6 animate-pop-in text-center z-10 relative">
+        <div className="w-full sky-panel p-8 rounded-3xl flex flex-col items-center gap-6 text-center z-10 relative">
           
           <div className="flex flex-col items-center gap-2">
             <span className="text-5xl animate-bounce">🏆</span>
-            <h1 className="text-4xl font-black text-yellow-400 uppercase tracking-tight drop-shadow-md">
+            <h1 className="text-3xl font-extrabold text-amber-500 uppercase tracking-tight">
               STAGE CLEAR!
             </h1>
-            <p className="text-zinc-400 text-xs font-semibold">Gemini AI 블록 세트를 활용하여 그림을 완벽히 메웠습니다!</p>
+            <p className="text-slate-400 text-xs font-medium">Gemini AI 블록으로 형태를 다 맞췄습니다!</p>
           </div>
 
-          <div className="px-5 py-2.5 bg-indigo-950/40 border border-indigo-500/30 rounded-2xl flex items-center gap-1.5">
-            <span className="text-xs text-zinc-400 font-bold uppercase">현재 등수 : </span>
-            <span className="text-sm font-black text-indigo-300">{rank}위</span>
+          <div className="px-5 py-2.5 bg-slate-50 border border-slate-100 rounded-2xl flex items-center gap-1.5">
+            <span className="text-xs text-slate-400 font-bold uppercase">현재 등수:</span>
+            <span className="text-sm font-black text-slate-700">{rank}위</span>
           </div>
 
-          <div className="w-full py-6 bg-zinc-950/60 rounded-2xl border border-zinc-800 shadow-inner flex flex-col items-center gap-2">
-            <div className="text-[10px] text-zinc-400 font-bold uppercase tracking-wider">획득 점수</div>
-            <div className="text-xs text-zinc-300 font-medium flex items-center gap-1.5">
-              이전 점수 <span className="font-extrabold text-zinc-200">{userScore - acquired}점</span> 
-              <span className="text-indigo-400 font-black">+</span> 
-              <span className="font-black text-emerald-400">{acquired}점</span>
+          {/* Completed puzzle mini preview */}
+          <div className="w-full bg-slate-50 border border-slate-100 p-4.5 rounded-2xl flex flex-col items-center gap-2">
+            <span className="text-[10px] text-slate-400 font-bold uppercase tracking-wider">완성한 퍼즐 그림</span>
+            <div className="bg-white p-2.5 rounded-xl border border-slate-200/50 shadow-inner">
+              <div 
+                className="grid gap-[2px]"
+                style={{ gridTemplateColumns: `repeat(${gridSize}, minmax(0, 1fr))` }}
+              >
+                {grid.map((row, r) => 
+                  row.map((cellColor, c) => {
+                    const isFilled = cellColor !== null;
+                    const thematicColor = isFilled ? getThematicCellColor(targetShapeName, r, c, gridSize) : 'bg-slate-100';
+                    return (
+                      <div 
+                        key={`${r}-${c}`}
+                        className={`w-4 h-4 rounded-[2px] ${
+                          isFilled 
+                            ? `bg-gradient-to-br ${thematicColor} shadow-[0_1px_2px_rgba(0,0,0,0.05)] border border-white/20` 
+                            : 'bg-slate-100'
+                        }`}
+                      />
+                    );
+                  })
+                )}
+              </div>
+            </div>
+            <span className="text-xs font-extrabold text-[#1e6068]">
+              {targetShapeName === '사과' ? '🍎 완성된 사과' : targetShapeName === '꽃' ? '🌸 완성된 꽃' : '🍰 완성된 케이크'}
+            </span>
+          </div>
+
+          <div className="w-full py-6 bg-slate-50 rounded-2xl border border-slate-100 flex flex-col items-center gap-2">
+            <div className="text-[10px] text-slate-400 font-bold uppercase tracking-wider">획득 점수</div>
+            <div className="text-xs text-slate-500 font-medium flex items-center gap-1.5">
+              이전 점수 <span className="font-extrabold text-slate-700">{userScore - acquired}점</span> 
+              <span className="text-slate-400 font-bold">+</span> 
+              <span className="font-black text-emerald-500">{acquired}점</span>
             </div>
             
-            <div className="h-[1px] w-1/2 bg-zinc-800/80 my-2" />
+            <div className="h-[1px] w-1/2 bg-slate-200/80 my-2" />
 
-            <div className="text-[10px] text-zinc-400 font-bold uppercase tracking-wider">누적 점수</div>
-            <div className="text-3xl font-black text-white bg-gradient-to-r from-yellow-400 via-amber-400 to-orange-500 bg-clip-text text-transparent drop-shadow-sm">
+            <div className="text-[10px] text-slate-400 font-bold uppercase tracking-wider">누적 점수</div>
+            <div className="text-3xl font-black text-[#1e6068]">
               {animatedScore}점
             </div>
           </div>
 
-          <div className="w-full flex justify-between items-center bg-zinc-800/20 p-4 rounded-xl border border-zinc-800/50">
+          <p className="text-[10.5px] text-slate-500 font-extrabold leading-relaxed max-w-[280px] bg-amber-50/40 border border-amber-100/50 py-2 px-3 rounded-xl">
+            💡 점수가 집계되는데 시간이 걸릴 수 있습니다. 만약 메인화면에서 점수가 더해지지 않았다면 새로고침 해주세요!
+          </p>
+
+          <div className="w-full flex justify-between items-center bg-slate-50 p-4 rounded-xl border border-slate-100">
             <div className="flex flex-col items-start">
-              <span className="text-[10px] text-zinc-400 font-bold uppercase">클리어 시간</span>
-              <span className="text-sm font-extrabold text-zinc-200 tabular-nums">{formatTime(time)}</span>
+              <span className="text-[10px] text-slate-400 font-bold uppercase">클리어 시간</span>
+              <span className="text-sm font-extrabold text-slate-700 tabular-nums">{formatTime(time)}</span>
             </div>
             
             {isNewRecord && (
-              <div className="bg-gradient-to-r from-amber-500 to-yellow-400 text-zinc-950 font-black text-[10px] px-3 py-1 rounded-full shadow-md animate-pulse">
+              <div className="bg-[#FED650] text-[#1e3a47] font-black text-[10px] px-3 py-1 rounded-full shadow-sm animate-pulse">
                 🔥 신기록!
               </div>
             )}
@@ -1328,14 +1930,14 @@ export default function BlockPuzzleGame() {
 
           <div className="w-full flex gap-3 mt-4">
             <button
-              onClick={() => setScreen('home')}
-              className="flex-1 py-3.5 bg-zinc-800 hover:bg-zinc-700 text-zinc-200 hover:text-white font-extrabold text-xs rounded-xl transition-all cursor-pointer border border-zinc-750"
+              onClick={() => { setScreen('home'); setActiveTab('play'); }}
+              className="flex-1 py-3 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-xs rounded-xl transition-all cursor-pointer border border-slate-200"
             >
               홈으로 🏠
             </button>
             <button
               onClick={restartGame}
-              className="flex-1 py-3.5 bg-gradient-to-r from-indigo-500 to-purple-600 text-white font-extrabold text-xs rounded-xl shadow-md hover:scale-[1.02] active:scale-[0.98] transition-all cursor-pointer"
+              className="flex-1 py-3 bg-[#AECFD4] hover:bg-[#96c4c9] text-[#1e3a47] font-extrabold text-xs rounded-xl shadow-sm transition-all cursor-pointer"
             >
               다시 플레이 🔄
             </button>
@@ -1347,13 +1949,909 @@ export default function BlockPuzzleGame() {
     );
   };
 
-  switch (screen) {
-    case 'playing':
-      return renderPlayingScreen();
-    case 'clear':
-      return renderClearScreen();
-    case 'home':
-    default:
-      return renderHomeScreen();
-  }
+  // ------------------------------------------
+  // LEADERBOARD TAB CONTENT
+  // ------------------------------------------
+  const renderLeaderboardTab = () => {
+    const sorted = [...players].sort((a, b) => b.score - a.score);
+    
+    return (
+      <div className="w-full max-w-lg mx-auto flex flex-col gap-6 animate-pop-in mt-4">
+        <div className="text-center flex flex-col gap-1.5">
+          <h2 className="text-3xl font-extrabold text-[#1e3a47]">LEADERBOARD</h2>
+          <p className="text-xs text-slate-500">실시간 글로벌 플레이어 누적 점수 순위</p>
+        </div>
+
+        <div className="sky-panel rounded-3xl overflow-hidden w-full">
+          <div className="px-6 py-4 bg-slate-50/50 border-b border-slate-100 flex items-center justify-between text-xs text-slate-400 font-bold uppercase">
+            <span>순위 & 플레이어</span>
+            <span>누적 점수</span>
+          </div>
+
+          <div className="flex flex-col">
+            {sorted.map((player, idx) => {
+              const isGold = idx === 0;
+              const rowBg = isGold ? 'bg-[#F8F3E6]' : 'bg-white';
+              const badgeBg = idx === 0 ? 'bg-[#4a453f] text-white' : idx === 1 ? 'bg-slate-300 text-slate-800' : idx === 2 ? 'bg-[#DCECF3] text-[#1e3a47]' : 'bg-slate-100 text-slate-500';
+              const division = getDivisionName(player.score);
+
+              return (
+                <div 
+                  key={idx} 
+                  className={`flex items-center justify-between px-6 py-4 border-b border-slate-100/60 ${rowBg}`}
+                >
+                  <div className="flex items-center gap-4">
+                    <div className={`w-8 h-8 rounded-full flex items-center justify-center font-bold text-sm shadow-sm ${badgeBg}`}>
+                      {idx + 1}
+                    </div>
+                    <div className="flex flex-col">
+                      <span className="text-sm font-bold text-slate-850">{player.name}</span>
+                      <span className="text-[10px] text-slate-400 font-semibold">{division}</span>
+                    </div>
+                  </div>
+                  
+                  <span className="text-sm font-black text-slate-800">{player.score.toLocaleString()} 점</span>
+                </div>
+              );
+            })}
+            {sorted.length === 0 && (
+              <div className="py-12 text-center text-sm text-slate-400">데이터가 없습니다.</div>
+            )}
+          </div>
+        </div>
+      </div>
+    );
+  };
+
+  // ------------------------------------------
+  // PROFILE TAB CONTENT
+  // ------------------------------------------
+  const renderProfileTab = () => {
+    return (
+      <div className="w-full max-w-md mx-auto flex flex-col gap-6 animate-pop-in mt-4">
+        <div className="text-center flex flex-col gap-1.5">
+          <h2 className="text-3xl font-extrabold text-[#1e3a47]">PROFILE & SETTINGS</h2>
+          <p className="text-xs text-slate-500">인증 정보 관리 및 게임 통계</p>
+        </div>
+
+        <div className="sky-panel p-6 rounded-3xl flex flex-col gap-6 w-full">
+          
+          {/* User profile detail */}
+          <div className="flex items-center gap-4 border-b border-slate-100 pb-4">
+            <div className="w-14 h-14 rounded-full border border-slate-200 overflow-hidden bg-slate-50 flex items-center justify-center text-xl shadow-inner">
+              {user?.user_metadata?.avatar_url ? (
+                <img src={user.user_metadata.avatar_url} alt="avatar" className="w-full h-full object-cover" />
+              ) : (
+                <span className="text-[#1e6068] font-bold uppercase">{user?.email?.[0] || 'G'}</span>
+              )}
+            </div>
+            
+            <div className="flex flex-col">
+              {user ? (
+                <>
+                  <span className="text-base font-bold text-slate-800">{user.email?.split('@')[0]}</span>
+                  <span className="text-xs text-emerald-600 bg-emerald-50 border border-emerald-100 px-2 py-0.5 rounded-full w-fit mt-1 font-semibold">인증 회원</span>
+                </>
+              ) : (
+                <>
+                  <span className="text-base font-bold text-slate-800">{guestId || '게스트'}</span>
+                  <span className="text-xs text-amber-600 bg-amber-50 border border-amber-100 px-2 py-0.5 rounded-full w-fit mt-1 font-semibold">게스트 모드</span>
+                </>
+              )}
+            </div>
+          </div>
+
+          {/* Statistics summary */}
+          <div className="grid grid-cols-2 gap-4">
+            <div className="bg-slate-50 p-4 rounded-2xl border border-slate-100 flex flex-col gap-1">
+              <span className="text-[10px] text-slate-400 font-bold uppercase">내 누적 점수</span>
+              <span className="text-lg font-black text-[#1e6068]">{userScore.toLocaleString()} 점</span>
+            </div>
+            <div className="bg-slate-50 p-4 rounded-2xl border border-slate-100 flex flex-col gap-1">
+              <span className="text-[10px] text-slate-400 font-bold uppercase">내 현재 등수</span>
+              <span className="text-lg font-black text-slate-700">{rank} 위</span>
+            </div>
+          </div>
+
+          {/* Login / logout action buttons */}
+          <div className="w-full mt-2">
+            {user ? (
+              <button
+                onClick={async () => {
+                  await signOut();
+                  setActiveTab('play');
+                  setScreen('home');
+                }}
+                className="w-full py-3.5 bg-rose-50 hover:bg-rose-100 border border-rose-200 text-rose-600 font-bold text-sm rounded-2xl transition-all cursor-pointer flex items-center justify-center gap-1.5"
+              >
+                로그아웃 (Sign Out) 🔑
+              </button>
+            ) : (
+              <Link
+                href="/auth"
+                className="w-full py-3.5 bg-[#AECFD4] hover:bg-[#96c4c9] text-[#1e3a47] font-black text-sm rounded-2xl transition-all flex items-center justify-center gap-1.5 shadow-sm"
+              >
+                구글 계정으로 로그인 🔑
+              </Link>
+            )}
+          </div>
+
+        </div>
+      </div>
+    );
+  };
+
+  const renderContent = () => {
+    if (activeTab === 'leaderboard') return renderLeaderboardTab();
+    if (activeTab === 'profile') return renderProfileTab();
+    
+    // Play Tab: render based on current gameplay screen state
+    switch (screen) {
+      case 'playing':
+        return renderPlayingScreen();
+      case 'clear':
+        return renderClearScreen();
+      case 'home':
+      default:
+        return renderHomeScreen();
+    }
+  };
+
+  // ==========================================
+  // 8. Main Render Wrapper
+  // ==========================================
+  return (
+    <div className="flex flex-col min-h-screen bg-gradient-to-b from-[#f7fafd] to-[#eef3f7] text-[#1e3a47]">
+      
+      {/* Top Header Navigation */}
+      <header className="w-full max-w-4xl mx-auto px-6 py-4 flex items-center justify-between border-b border-slate-200/40">
+        <div 
+          onClick={() => { setActiveTab('play'); setScreen('home'); }}
+          className="text-2xl font-black tracking-tight text-[#1e3a47] cursor-pointer flex items-center gap-1"
+        >
+          block-puzzle
+        </div>
+        
+        {/* Right side icon links */}
+        <div className="flex items-center gap-3">
+          <button 
+            onClick={() => setActiveTab('leaderboard')}
+            className={`p-2 rounded-xl transition-all cursor-pointer ${
+              activeTab === 'leaderboard' ? 'bg-[#EAE3D2] text-[#1e3a47]' : 'text-slate-400 hover:bg-slate-100 hover:text-slate-600'
+            }`}
+            title="리더보드 보기"
+          >
+            <svg className="w-5.5 h-5.5" fill="none" stroke="currentColor" strokeWidth="2.5" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 002 2h2a2 2 0 002-2z" />
+            </svg>
+          </button>
+          
+          <button 
+            onClick={() => setActiveTab('profile')}
+            className={`p-2 rounded-xl transition-all cursor-pointer ${
+              activeTab === 'profile' ? 'bg-[#EAE3D2] text-[#1e3a47]' : 'text-slate-400 hover:bg-slate-100 hover:text-slate-600'
+            }`}
+            title="설정 및 프로필"
+          >
+            <svg className="w-5.5 h-5.5" fill="none" stroke="currentColor" strokeWidth="2.5" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
+              <path strokeLinecap="round" strokeLinejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+            </svg>
+          </button>
+        </div>
+      </header>
+
+      {/* Main content body */}
+      <main className="flex-1 flex flex-col items-center justify-center w-full max-w-4xl mx-auto px-4 pt-4 pb-28">
+        {renderContent()}
+      </main>
+
+      {/* Sticky Bottom Tab Bar Navigation */}
+      <nav className="fixed bottom-0 left-0 right-0 h-20 bg-white border-t border-slate-100 flex items-center justify-around z-40 px-6 shadow-[0_-5px_25px_rgba(30,58,71,0.03)]">
+        
+        {/* PLAY TAB */}
+        <button 
+          onClick={() => { setActiveTab('play'); }}
+          className="flex flex-col items-center gap-1 cursor-pointer w-24 py-1.5 rounded-2xl transition-all"
+        >
+          <div className={`flex flex-col items-center gap-0.5 px-5 py-1 rounded-xl transition-all ${
+            activeTab === 'play' ? 'bg-[#EAE3D2] text-[#1e3a47] font-bold' : 'text-slate-400 hover:text-slate-600'
+          }`}>
+            <svg className="w-5.5 h-5.5" fill="none" stroke="currentColor" strokeWidth="2.2" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" d="M9 17.25v1.007a3 3 0 01-.879 2.122L7.5 21h9l-.621-.621A3 3 0 0115 18.257V17.25m6-12V15a2.25 2.25 0 01-2.25 2.25H5.25A2.25 2.25 0 013 15V5.25m18 0A2.25 2.25 0 0018.75 3H5.25A2.25 2.25 0 003 5.25m18 0V12a2.25 2.25 0 01-2.25 2.25H5.25A2.25 2.25 0 013 12V5.25" />
+            </svg>
+            <span className="text-[10px] uppercase tracking-wide">Play</span>
+          </div>
+        </button>
+
+        {/* LEADERBOARD TAB */}
+        <button 
+          onClick={() => { setActiveTab('leaderboard'); }}
+          className="flex flex-col items-center gap-1 cursor-pointer w-24 py-1.5 rounded-2xl transition-all"
+        >
+          <div className={`flex flex-col items-center gap-0.5 px-5 py-1 rounded-xl transition-all ${
+            activeTab === 'leaderboard' ? 'bg-[#EAE3D2] text-[#1e3a47] font-bold' : 'text-slate-400 hover:text-slate-600'
+          }`}>
+            <svg className="w-5.5 h-5.5" fill="none" stroke="currentColor" strokeWidth="2.2" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" d="M16.5 18.75h-9m9 0a3 3 0 013 3h-15a3 3 0 013-3m9 0v-3.375c0-.621-.504-1.125-1.125-1.125h-2.25a1.125 1.125 0 00-1.125 1.125v3.375m9-6.375c.621 0 1.125-.504 1.125-1.125V8.25a1.125 1.125 0 00-1.125-1.125h-2.25m-6.75 6.375a1.125 1.125 0 01-1.125-1.125V8.25a1.125 1.125 0 011.125-1.125h2.25m-2.25 0a3 3 0 00-3-3h10.5a3 3 0 00-3 3m-9 0h12" />
+            </svg>
+            <span className="text-[10px] uppercase tracking-wide">Rankings</span>
+          </div>
+        </button>
+
+        {/* PROFILE TAB */}
+        <button 
+          onClick={() => { setActiveTab('profile'); }}
+          className="flex flex-col items-center gap-1 cursor-pointer w-24 py-1.5 rounded-2xl transition-all"
+        >
+          <div className={`flex flex-col items-center gap-0.5 px-5 py-1 rounded-xl transition-all ${
+            activeTab === 'profile' ? 'bg-[#EAE3D2] text-[#1e3a47] font-bold' : 'text-slate-400 hover:text-slate-600'
+          }`}>
+            <svg className="w-5.5 h-5.5" fill="none" stroke="currentColor" strokeWidth="2.2" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" d="M15.75 6a3.75 3.75 0 11-7.5 0 3.75 3.75 0 017.5 0zM4.501 20.118a7.5 7.5 0 0114.998 0A17.933 17.933 0 0112 21.75c-2.676 0-5.216-.584-7.499-1.632z" />
+            </svg>
+            <span className="text-[10px] uppercase tracking-wide">Profile</span>
+          </div>
+        </button>
+
+      </nav>
+
+      {/* Difficulty select popup modal (Light Theme style) */}
+      {showDiffModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm">
+          <div className="relative w-full max-w-sm mx-4 bg-white border border-slate-100 rounded-3xl p-6 shadow-2xl animate-pop-in">
+            <button 
+              onClick={() => setShowDiffModal(false)}
+              className="absolute top-4 right-4 text-slate-400 hover:text-slate-600 text-lg font-bold cursor-pointer w-8 h-8 flex items-center justify-center rounded-full bg-slate-100 hover:bg-slate-200 transition-colors"
+            >
+              ✕
+            </button>
+
+            <h2 className="text-xl font-extrabold text-center text-[#1e3a47] mb-6">
+              난이도를 선택하세요
+            </h2>
+
+            <div className="flex flex-col gap-4">
+              <button
+                onClick={() => startGame('하')}
+                className="flex flex-col items-center justify-center p-4 bg-slate-50 hover:bg-emerald-50 border border-slate-200/60 hover:border-emerald-300 rounded-2xl transition-all group cursor-pointer text-center"
+              >
+                <span className="text-emerald-600 font-black text-base group-hover:scale-102 transition-transform">하 (100점)</span>
+                <span className="text-[11px] text-slate-400 mt-1">5x5 그리드 • 아기자기한 기본 난이도</span>
+                <span className="text-[11px] text-[#1e6068] font-bold mt-1">
+                  최고 기록: {bestTimes['하'] ? formatTime(bestTimes['하']!) : '기록 없음'}
+                </span>
+              </button>
+
+              <button
+                onClick={() => startGame('중')}
+                className="flex flex-col items-center justify-center p-4 bg-slate-50 hover:bg-amber-50 border border-slate-200/60 hover:border-amber-300 rounded-2xl transition-all group cursor-pointer text-center"
+              >
+                <span className="text-amber-600 font-black text-base group-hover:scale-102 transition-transform">중 (250점)</span>
+                <span className="text-[11px] text-slate-400 mt-1">7x7 그리드 • 집중이 필요한 중급 퍼즐</span>
+                <span className="text-[11px] text-[#1e6068] font-bold mt-1">
+                  최고 기록: {bestTimes['중'] ? formatTime(bestTimes['중']!) : '기록 없음'}
+                </span>
+              </button>
+
+              <button
+                onClick={() => startGame('상')}
+                className="flex flex-col items-center justify-center p-4 bg-slate-50 hover:bg-rose-50 border border-slate-200/60 hover:border-rose-300 rounded-2xl transition-all group cursor-pointer text-center"
+              >
+                <span className="text-rose-600 font-black text-base group-hover:scale-102 transition-transform">상 (1000점)</span>
+                <span className="text-[10px] text-rose-500 font-extrabold mt-0.5">가장 복잡한 퍼즐에 도전하세요!</span>
+                <span className="text-[11px] text-slate-400 mt-1">10x10 그리드 • 극한의 두뇌 회전 고난도</span>
+                <span className="text-[11px] text-[#1e6068] font-bold mt-1">
+                  최고 기록: {bestTimes['상'] ? formatTime(bestTimes['상']!) : '기록 없음'}
+                </span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Shop popup modal (Light Theme style) */}
+      {showShopModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm">
+          <div className="relative w-full max-w-md mx-4 bg-white border border-slate-100 rounded-3xl p-6 shadow-2xl animate-pop-in flex flex-col gap-5 max-h-[85vh] overflow-y-auto">
+            {/* Close Button */}
+            <button 
+              onClick={() => {
+                setShowShopModal(false);
+                setSelectedShopItem(null);
+                setShopMessage(null);
+              }}
+              className="absolute top-4 right-4 text-slate-400 hover:text-slate-600 text-lg font-bold cursor-pointer w-8 h-8 flex items-center justify-center rounded-full bg-slate-100 hover:bg-slate-200 transition-colors"
+            >
+              ✕
+            </button>
+
+            {/* Title (중앙 상단에 "상점") */}
+            <h2 className="text-2xl font-black text-center text-[#1e3a47] border-b border-slate-100 pb-3 mt-2">
+              상점
+            </h2>
+
+            {/* Gold Balance Display inside Shop */}
+            <div className="flex items-center justify-between bg-amber-50 border border-amber-100 px-4 py-2.5 rounded-2xl">
+              <span className="text-xs text-amber-800 font-bold flex items-center gap-1.5">
+                <svg className="w-3.5 h-3.5 text-amber-600 flex-shrink-0" fill="none" stroke="currentColor" strokeWidth="2.5" viewBox="0 0 24 24">
+                  <circle cx="12" cy="12" r="9" />
+                  <circle cx="12" cy="12" r="5" />
+                </svg>
+                내 보유 골드:
+              </span>
+              <span className="text-sm font-black text-amber-600">{gold.toLocaleString()} Gold</span>
+            </div>
+
+            {/* Chapters / Tabs (첫 번째: Gold, 두 번째: Cash) */}
+            <div className="flex gap-2 bg-slate-100 p-1.5 rounded-2xl">
+              <button
+                onClick={() => {
+                  setShopTab('gold');
+                  setSelectedShopItem(null);
+                  setShopMessage(null);
+                }}
+                className={`flex-1 py-2.5 rounded-xl font-bold text-xs cursor-pointer transition-all ${
+                  shopTab === 'gold' 
+                    ? 'bg-white text-[#1e3a47] shadow-sm font-black' 
+                    : 'text-slate-400 hover:text-slate-600'
+                }`}
+              >
+                Gold
+              </button>
+              <button
+                onClick={() => {
+                  setShopTab('cash');
+                  setSelectedShopItem(null);
+                  setShopMessage(null);
+                }}
+                className={`flex-1 py-2.5 rounded-xl font-bold text-xs cursor-pointer transition-all ${
+                  shopTab === 'cash' 
+                    ? 'bg-white text-[#1e3a47] shadow-sm font-black' 
+                    : 'text-slate-400 hover:text-slate-600'
+                }`}
+              >
+                Cash
+              </button>
+            </div>
+
+            {/* Tab/Chapter Content */}
+            <div className="flex-1 flex flex-col gap-4">
+              {shopTab === 'gold' ? (
+                /* Gold Chapter: Time Sale (Limit 1), Block Change, Hint */
+                <div className="flex flex-col gap-3">
+                  {/* Time Sale Item Card */}
+                  <button
+                    onClick={() => {
+                      if (hasBoughtTimeSale) {
+                        setShopMessage({ text: '이미 타임 세일 상품을 구매하셨습니다! (구매 제한: 1개)', success: false });
+                        return;
+                      }
+                      setSelectedShopItem({
+                        id: 'timesale',
+                        name: 'Time Sale (블럭 변경)',
+                        description: '아이템 사용 후 3개의 블럭 중 하나를 선택하여 원하는 블록으로 변경합니다.',
+                        priceText: '100 Gold',
+                        originalPriceText: '200 Gold',
+                        icon: '⚡',
+                        badge: '할인 • 1회 한정'
+                      });
+                      setShopMessage(null);
+                    }}
+                    disabled={hasBoughtTimeSale}
+                    className={`flex items-center justify-between p-4 rounded-2xl text-left border transition-all cursor-pointer ${
+                      hasBoughtTimeSale 
+                        ? 'opacity-60 bg-slate-100 border-slate-200/80 cursor-not-allowed'
+                        : selectedShopItem?.id === 'timesale'
+                          ? 'bg-[#FFF9E6] border-amber-400 shadow-sm scale-101'
+                          : 'bg-slate-50 hover:bg-slate-100/70 border-slate-200/60'
+                    }`}
+                  >
+                    <div className="flex items-center gap-3">
+                      <div className="w-10 h-10 rounded-xl bg-amber-100 flex items-center justify-center shadow-inner">
+                        <svg className="w-5 h-5 text-amber-600 flex-shrink-0" fill="none" stroke="currentColor" strokeWidth="2.2" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" d="M3.75 13.5l10.5-11.25L12 10.5h8.25L9.75 21.75 12 13.5H3.75z" />
+                        </svg>
+                      </div>
+                      <div className="flex flex-col">
+                        <div className="flex items-center gap-1.5">
+                          <span className="text-sm font-bold text-slate-800">Time Sale</span>
+                          <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded-md ${hasBoughtTimeSale ? 'bg-slate-400 text-white' : 'bg-rose-500 text-white'}`}>
+                            {hasBoughtTimeSale ? '1/1' : '0/1'}
+                          </span>
+                        </div>
+                        <span className="text-[10px] text-slate-400 font-semibold mt-0.5">블럭 변경 아이템 할인</span>
+                      </div>
+                    </div>
+                    <div className="text-right flex flex-col">
+                      <span className="text-xs text-slate-400 line-through">200 Gold</span>
+                      <span className="text-sm font-black text-rose-500">100 Gold</span>
+                    </div>
+                  </button>
+
+                  {/* Standard Block Change Item Card */}
+                  <button
+                    onClick={() => {
+                      setSelectedShopItem({
+                        id: 'blockchange',
+                        name: '블럭 변경 아이템',
+                        description: '아이템 사용 후 3개의 블럭 중 하나를 선택하여 원하는 블록으로 변경합니다.',
+                        priceText: '200 Gold',
+                        icon: '🔄'
+                      });
+                      setShopMessage(null);
+                    }}
+                    className={`flex items-center justify-between p-4 rounded-2xl text-left border transition-all cursor-pointer ${
+                      selectedShopItem?.id === 'blockchange'
+                        ? 'bg-[#FFF9E6] border-amber-400 shadow-sm scale-101'
+                        : 'bg-slate-50 hover:bg-slate-100/70 border-slate-200/60'
+                    }`}
+                  >
+                    <div className="flex items-center gap-3">
+                      <div className="w-10 h-10 rounded-xl bg-slate-100 flex items-center justify-center shadow-inner">
+                        <svg className="w-5 h-5 text-slate-600 flex-shrink-0" fill="none" stroke="currentColor" strokeWidth="2.2" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0l3.181 3.183a8.25 8.25 0 0013.803-3.7M4.031 9.865a8.25 8.25 0 0113.803-3.7l3.181 3.182m0-4.991v4.99" />
+                        </svg>
+                      </div>
+                      <div className="flex flex-col">
+                        <span className="text-sm font-bold text-slate-800">블럭 변경 아이템</span>
+                        <span className="text-[10px] text-slate-400 font-semibold mt-0.5">원하지 않는 블럭 교체</span>
+                      </div>
+                    </div>
+                    <span className="text-sm font-black text-slate-700">200 Gold</span>
+                  </button>
+
+                  {/* Hint Item Card */}
+                  <button
+                    onClick={() => {
+                      setSelectedShopItem({
+                        id: 'hint',
+                        name: '힌트 아이템',
+                        description: '아이템 사용 후 3개의 블럭 중 하나를 선택하면 놓아야 하는 위치를 표시합니다.',
+                        priceText: '100 Gold',
+                        icon: '💡'
+                      });
+                      setShopMessage(null);
+                    }}
+                    className={`flex items-center justify-between p-4 rounded-2xl text-left border transition-all cursor-pointer ${
+                      selectedShopItem?.id === 'hint'
+                        ? 'bg-[#FFF9E6] border-amber-400 shadow-sm scale-101'
+                        : 'bg-slate-50 hover:bg-slate-100/70 border-slate-200/60'
+                    }`}
+                  >
+                    <div className="flex items-center gap-3">
+                      <div className="w-10 h-10 rounded-xl bg-amber-50/80 flex items-center justify-center shadow-inner">
+                        <svg className="w-5 h-5 text-amber-500 flex-shrink-0" fill="none" stroke="currentColor" strokeWidth="2.2" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" d="M12 18h.01M8 21h8a2 2 0 002-2h-12a2 2 0 002 2zm4-19c-3.866 0-7 3.134-7 7 0 2.277 1.087 4.3 2.775 5.588.61.465.975 1.196.975 1.967v1.445h6.5v-1.445c0-.77.366-1.502.975-1.967A6.978 6.978 0 0019 9c0-3.866-3.134-7-7-7z" />
+                        </svg>
+                      </div>
+                      <div className="flex flex-col">
+                        <span className="text-sm font-bold text-slate-800">힌트 아이템</span>
+                        <span className="text-[10px] text-slate-400 font-semibold mt-0.5">배치 힌트 정보 확인</span>
+                      </div>
+                    </div>
+                    <span className="text-sm font-black text-slate-700">100 Gold</span>
+                  </button>
+                </div>
+              ) : (
+                /* Cash Chapter: Arranged in 2 rows. Row 1: Item Set, Row 2: Gold packages */
+                <div className="flex flex-col gap-3">
+                  {/* Row 1: Item Set (아이템 세트) */}
+                  <button
+                    onClick={() => {
+                      if (hasBoughtItemSet) {
+                        setShopMessage({ text: '이미 아이템 세트 상품을 구매하셨습니다! (구매 제한: 1개)', success: false });
+                        return;
+                      }
+                      setSelectedShopItem({
+                        id: 'itemset',
+                        name: '아이템 세트',
+                        description: '힌트 아이템 20개와 블럭 변경 아이템 20개를 획득합니다.',
+                        priceText: '4,900원',
+                        icon: '🎁'
+                      });
+                      setShopMessage(null);
+                    }}
+                    disabled={hasBoughtItemSet}
+                    className={`w-full p-4 rounded-2xl text-left border transition-all cursor-pointer flex items-center justify-between ${
+                      hasBoughtItemSet
+                        ? 'opacity-60 bg-slate-100 border-slate-200/80 cursor-not-allowed'
+                        : selectedShopItem?.id === 'itemset'
+                          ? 'bg-[#FFF9E6] border-amber-400 shadow-sm scale-101'
+                          : 'bg-gradient-to-r from-violet-50 to-indigo-50 hover:from-violet-100 hover:to-indigo-100 border-indigo-150/40'
+                    }`}
+                  >
+                    <div className="flex items-center gap-3">
+                      <div className="w-11 h-11 rounded-xl bg-indigo-100 flex items-center justify-center shadow-inner">
+                        <svg className="w-5.5 h-5.5 text-indigo-500 flex-shrink-0" fill="none" stroke="currentColor" strokeWidth="2.2" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" d="M20.25 7.5l-.625 10.632a2.25 2.25 0 01-2.247 2.118H6.622a2.25 2.25 0 01-2.247-2.118L3.75 7.5M10 11.25h4M3.375 7.5h17.25c.621 0 1.125-.504 1.125-1.125v-1.5c0-.621-.504-1.125-1.125-1.125H3.375c-.621 0-1.125.504-1.125 1.125v1.5c0 .621.504 1.125 1.125 1.125z" />
+                        </svg>
+                      </div>
+                      <div className="flex flex-col">
+                        <div className="flex items-center gap-1.5">
+                          <span className="text-sm font-black text-[#1e3a47]">아이템 세트</span>
+                          <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded-md ${hasBoughtItemSet ? 'bg-slate-400 text-white' : 'bg-indigo-600 text-white bg-indigo-600'}`}>
+                            {hasBoughtItemSet ? '1/1' : '0/1'}
+                          </span>
+                        </div>
+                        <span className="text-[10px] text-indigo-500 font-semibold mt-0.5">힌트 20개 + 블록 변경 20개</span>
+                      </div>
+                    </div>
+                    <span className="text-base font-black text-indigo-600">4,900원</span>
+                  </button>
+
+                  {/* Row 2: 2 Column rectangular cards for Gold 10000 and Gold 5000 */}
+                  <div className="grid grid-cols-2 gap-3">
+                    {/* Gold 10000개 */}
+                    <button
+                      onClick={() => {
+                        setSelectedShopItem({
+                          id: 'gold10000',
+                          name: 'Gold 10000개',
+                          description: '10000 gold 획득합니다.',
+                          priceText: '10,000원',
+                          icon: '🪙'
+                        });
+                        setShopMessage(null);
+                      }}
+                      className={`p-4 rounded-2xl text-center border transition-all cursor-pointer flex flex-col items-center justify-center gap-2 ${
+                        selectedShopItem?.id === 'gold10000'
+                          ? 'bg-[#FFF9E6] border-amber-400 shadow-sm scale-101'
+                          : 'bg-slate-50 hover:bg-slate-100/70 border-slate-200/60'
+                      }`}
+                    >
+                      <div className="w-10 h-10 rounded-xl bg-amber-100 flex items-center justify-center shadow-inner">
+                        <svg className="w-5 h-5 text-amber-500 flex-shrink-0" fill="none" stroke="currentColor" strokeWidth="2.2" viewBox="0 0 24 24">
+                          <circle cx="12" cy="12" r="9" />
+                          <circle cx="12" cy="12" r="5" />
+                        </svg>
+                      </div>
+                      <div className="flex flex-col">
+                        <span className="text-xs font-black text-slate-800">Gold 10000개</span>
+                        <span className="text-[10px] text-slate-400 font-semibold mt-0.5">대용량 패키지</span>
+                      </div>
+                      <span className="text-xs font-black text-slate-700 bg-slate-200/40 px-2.5 py-1 rounded-lg mt-1">10,000원</span>
+                    </button>
+
+                    {/* Gold 5000개 */}
+                    <button
+                      onClick={() => {
+                        setSelectedShopItem({
+                          id: 'gold5000',
+                          name: 'Gold 5000개',
+                          description: '5000 gold 획득합니다.',
+                          priceText: '5,000원',
+                          icon: '🪙'
+                        });
+                        setShopMessage(null);
+                      }}
+                      className={`p-4 rounded-2xl text-center border transition-all cursor-pointer flex flex-col items-center justify-center gap-2 ${
+                        selectedShopItem?.id === 'gold5000'
+                          ? 'bg-[#FFF9E6] border-amber-400 shadow-sm scale-101'
+                          : 'bg-slate-50 hover:bg-slate-100/70 border-slate-200/60'
+                      }`}
+                    >
+                      <div className="w-10 h-10 rounded-xl bg-amber-50 flex items-center justify-center shadow-inner">
+                        <svg className="w-5 h-5 text-amber-555 flex-shrink-0" fill="none" stroke="currentColor" strokeWidth="2.2" viewBox="0 0 24 24">
+                          <circle cx="12" cy="12" r="9" />
+                          <circle cx="12" cy="12" r="5" />
+                        </svg>
+                      </div>
+                      <div className="flex flex-col">
+                        <span className="text-xs font-black text-slate-800">Gold 5000개</span>
+                        <span className="text-[10px] text-slate-400 font-semibold mt-0.5">실속형 패키지</span>
+                      </div>
+                      <span className="text-xs font-black text-slate-700 bg-slate-200/40 px-2.5 py-1 rounded-lg mt-1">5,000원</span>
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* Description & Purchase panel */}
+            {selectedShopItem ? (
+              <div className="bg-slate-50 border border-slate-100 p-4.5 rounded-2xl flex flex-col gap-3.5 animate-pop-in">
+                <div className="flex items-center gap-2">
+                  <span className="text-lg flex-shrink-0">
+                    {selectedShopItem.id === 'timesale' ? (
+                      <svg className="w-5 h-5 text-amber-500" fill="none" stroke="currentColor" strokeWidth="2.2" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M3.75 13.5l10.5-11.25L12 10.5h8.25L9.75 21.75 12 13.5H3.75z" />
+                      </svg>
+                    ) : selectedShopItem.id === 'blockchange' ? (
+                      <svg className="w-5 h-5 text-slate-500" fill="none" stroke="currentColor" strokeWidth="2.2" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0l3.181 3.183a8.25 8.25 0 0013.803-3.7M4.031 9.865a8.25 8.25 0 0113.803-3.7l3.181 3.182m0-4.991v4.99" />
+                      </svg>
+                    ) : selectedShopItem.id === 'hint' ? (
+                      <svg className="w-5 h-5 text-amber-500" fill="none" stroke="currentColor" strokeWidth="2.2" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M12 18h.01M8 21h8a2 2 0 002-2h-12a2 2 0 002 2zm4-19c-3.866 0-7 3.134-7 7 0 2.277 1.087 4.3 2.775 5.588.61.465.975 1.196.975 1.967v1.445h6.5v-1.445c0-.77.366-1.502.975-1.967A6.978 6.978 0 0019 9c0-3.866-3.134-7-7-7z" />
+                      </svg>
+                    ) : selectedShopItem.id === 'itemset' ? (
+                      <svg className="w-5 h-5 text-indigo-500" fill="none" stroke="currentColor" strokeWidth="2.2" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M20.25 7.5l-.625 10.632a2.25 2.25 0 01-2.247 2.118H6.622a2.25 2.25 0 01-2.247-2.118L3.75 7.5M10 11.25h4M3.375 7.5h17.25c.621 0 1.125-.504 1.125-1.125v-1.5c0-.621-.504-1.125-1.125-1.125H3.375c-.621 0-1.125.504-1.125 1.125v1.5c0 .621.504 1.125 1.125 1.125z" />
+                      </svg>
+                    ) : (
+                      <svg className="w-5 h-5 text-amber-500" fill="none" stroke="currentColor" strokeWidth="2.2" viewBox="0 0 24 24">
+                        <circle cx="12" cy="12" r="9" />
+                        <circle cx="12" cy="12" r="5" />
+                      </svg>
+                    )}
+                  </span>
+                  <span className="text-xs text-slate-400 font-bold uppercase tracking-wider">상품 설명</span>
+                </div>
+                
+                {/* Description texts */}
+                <div className="flex flex-col gap-1.5">
+                  <h4 className="text-sm font-black text-slate-800">{selectedShopItem.name}</h4>
+                  <p className="text-xs text-slate-550 font-medium leading-5">
+                    {selectedShopItem.description}
+                  </p>
+                </div>
+
+                {/* Purchase Button */}
+                <button
+                  onClick={async () => {
+                    if (selectedShopItem) {
+                      const isCashItem = ['itemset', 'gold10000', 'gold5000'].includes(selectedShopItem.id);
+                      if (isCashItem) {
+                        setPayerName(user?.email ? user.email.split('@')[0] : '');
+                        setPayerEmail(user?.email || '');
+                        setPayerNameError('');
+                        setPayerEmailError('');
+                        setShowBillingModal(true);
+                      } else {
+                        const res = await purchaseItem(selectedShopItem.id as any);
+                        setShopMessage({ text: res.message, success: res.success });
+                      }
+                    }
+                  }}
+                  className="w-full py-3 bg-[#AECFD4] hover:bg-[#96c4c9] text-[#1e3a47] font-black text-sm rounded-xl shadow-sm hover:scale-[1.01] active:scale-[0.99] transition-all cursor-pointer flex items-center justify-center gap-1.5 mt-1"
+                >
+                  {selectedShopItem.priceText}에 구매하기
+                </button>
+              </div>
+            ) : (
+              <div className="text-center py-6 text-xs text-slate-400 font-semibold">
+                상점에서 구매할 상품을 선택해주세요.
+              </div>
+            )}
+
+            {/* Feedback Messages inside Shop */}
+            {shopMessage && (
+              <div className={`p-3.5 rounded-xl text-center text-xs font-semibold animate-pop-in ${
+                shopMessage.success 
+                  ? 'bg-emerald-50 border border-emerald-100 text-emerald-600' 
+                  : 'bg-rose-50 border border-rose-100 text-rose-600'
+              }`}>
+                {shopMessage.success ? '🎉' : '⚠️'} {shopMessage.text}
+              </div>
+            )}
+
+            {/* Modal Bottom Actions */}
+            <button
+              onClick={() => {
+                setShowShopModal(false);
+                setSelectedShopItem(null);
+                setShopMessage(null);
+              }}
+              className="w-full py-3 bg-slate-100 hover:bg-slate-200 text-slate-600 text-xs font-bold rounded-xl transition-all cursor-pointer text-center"
+            >
+              상점 닫기
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Toss Payments Payer Info Modal */}
+      {showBillingModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm animate-pop-in">
+          <div className="relative w-full max-w-sm mx-4 bg-white border border-slate-100 rounded-3xl p-6 shadow-2xl flex flex-col gap-4 text-center">
+            {/* Close */}
+            <button 
+              onClick={() => setShowBillingModal(false)}
+              className="absolute top-4 right-4 text-slate-400 hover:text-slate-655 text-lg font-bold cursor-pointer w-8 h-8 flex items-center justify-center rounded-full bg-slate-100 hover:bg-slate-200 transition-colors"
+            >
+              ✕
+            </button>
+
+            <h3 className="text-lg font-extrabold text-[#1e3a47] mt-2">결제자 정보 입력</h3>
+            <p className="text-[11px] text-slate-400 -mt-2">결제를 진행하기 위해 아래 정보를 입력해 주세요.</p>
+
+            <div className="flex flex-col gap-3 text-left mt-2">
+              {/* Name field */}
+              <div className="flex flex-col gap-1">
+                <label className="text-[10px] text-slate-450 font-bold uppercase">이름</label>
+                <input
+                  type="text"
+                  value={payerName}
+                  onChange={(e) => setPayerName(e.target.value)}
+                  placeholder="홍길동"
+                  className="w-full px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs font-semibold focus:outline-none focus:border-amber-400 focus:bg-white transition-all text-[#1e3a47]"
+                />
+                {payerNameError && (
+                  <span className="text-[9px] text-rose-500 font-semibold pl-1">⚠️ {payerNameError}</span>
+                )}
+              </div>
+
+              {/* Email field */}
+              <div className="flex flex-col gap-1">
+                <label className="text-[10px] text-slate-450 font-bold uppercase">이메일</label>
+                <input
+                  type="email"
+                  value={payerEmail}
+                  onChange={(e) => setPayerEmail(e.target.value)}
+                  placeholder="example@email.com"
+                  className="w-full px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs font-semibold focus:outline-none focus:border-amber-400 focus:bg-white transition-all text-[#1e3a47]"
+                />
+                {payerEmailError && (
+                  <span className="text-[9px] text-rose-500 font-semibold pl-1">⚠️ {payerEmailError}</span>
+                )}
+              </div>
+            </div>
+
+            {/* Actions */}
+            <div className="flex gap-3 mt-4">
+              <button
+                onClick={() => setShowBillingModal(false)}
+                disabled={payerLoading}
+                className="flex-1 py-3 bg-slate-100 hover:bg-slate-200 text-slate-500 hover:text-slate-700 font-bold text-xs rounded-xl cursor-pointer transition-colors border border-slate-200 disabled:opacity-50"
+              >
+                취소
+              </button>
+              <button
+                onClick={handleTossPayment}
+                disabled={payerLoading}
+                className="flex-1 py-3 bg-[#AECFD4] hover:bg-[#96c4c9] text-[#1e3a47] font-black text-xs rounded-xl shadow-sm cursor-pointer transition-all flex items-center justify-center gap-1 disabled:opacity-50"
+              >
+                {payerLoading ? (
+                  <div className="w-3.5 h-3.5 border-2 border-[#1e3a47] border-t-transparent rounded-full animate-spin"></div>
+                ) : (
+                  '결제하기'
+                )}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Block Shape selector modal */}
+      {showShapeSelectorModal && (
+        <div className="fixed inset-0 z-55 flex items-center justify-center bg-black/40 backdrop-blur-sm animate-pop-in">
+          <div className="relative w-full max-w-sm mx-4 bg-white border border-slate-100 rounded-3xl p-6 shadow-2xl flex flex-col gap-4 text-center">
+            <button 
+              onClick={() => {
+                setShowShapeSelectorModal(false);
+                setSelectedPoolBlockIdxToChange(null);
+                setUsingItem(null);
+              }}
+              className="absolute top-4 right-4 text-slate-400 hover:text-slate-655 text-lg font-bold cursor-pointer w-8 h-8 flex items-center justify-center rounded-full bg-slate-100 hover:bg-slate-200 transition-colors"
+            >
+              ✕
+            </button>
+
+            <h3 className="text-lg font-extrabold text-[#1e3a47] mt-2">변경할 블록 모양 선택</h3>
+            <p className="text-[11px] text-slate-400 -mt-2">교체할 원하는 모양을 선택해 주세요.</p>
+
+            {/* Grid of block template options */}
+            <div className="grid grid-cols-3 gap-3.5 my-2 max-h-[40vh] overflow-y-auto p-1">
+              {[
+                { name: '1x1 Square', shape: [[1]] },
+                { name: '2x1 Horiz', shape: [[1, 1]] },
+                { name: '1x2 Vert', shape: [[1], [1]] },
+                { name: '3x1 Horiz', shape: [[1, 1, 1]] },
+                { name: '1x3 Vert', shape: [[1], [1], [1]] },
+                { name: '2x2 Block', shape: [[1, 1], [1, 1]] },
+                { name: 'L Shape', shape: [[1, 0], [1, 1]] },
+                { name: 'T Shape', shape: [[0, 1, 0], [1, 1, 1]] }
+              ].map((tmpl, idx) => (
+                <button
+                  key={idx}
+                  onClick={() => handleSelectBlockShape(tmpl.shape)}
+                  className="p-3 bg-slate-50 hover:bg-amber-50 border border-slate-200 hover:border-amber-350 rounded-2xl cursor-pointer transition-all flex flex-col items-center justify-center gap-2"
+                >
+                  <div 
+                    className="grid gap-[2px]"
+                    style={{ gridTemplateColumns: `repeat(${tmpl.shape[0].length}, minmax(0, 1fr))` }}
+                  >
+                    {tmpl.shape.map((row, r) => 
+                      row.map((val, c) => (
+                        <div 
+                          key={`${r}-${c}`}
+                          className={`w-2 h-2 rounded-[2px] ${
+                            val === 1 
+                              ? 'bg-amber-500 border border-white/20' 
+                              : 'bg-transparent'
+                          }`}
+                        />
+                      ))
+                    )}
+                  </div>
+                  <span className="text-[9px] text-slate-455 font-bold tracking-tight">{tmpl.name}</span>
+                </button>
+              ))}
+            </div>
+
+            <button
+              onClick={() => {
+                setShowShapeSelectorModal(false);
+                setSelectedPoolBlockIdxToChange(null);
+                setUsingItem(null);
+              }}
+              className="w-full py-3 bg-slate-100 hover:bg-slate-200 text-slate-600 text-xs font-bold rounded-xl transition-all cursor-pointer text-center"
+            >
+              취소
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Guest migration modal (Light Theme style) */}
+      {pendingMigrationScore !== null && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm">
+          <div className="relative w-full max-w-sm mx-4 bg-white border border-slate-100 rounded-3xl p-6 shadow-2xl animate-pop-in text-center flex flex-col gap-4">
+            <span className="text-4xl animate-bounce">⚡</span>
+            <h3 className="text-lg font-extrabold text-[#1e3a47]">게스트 점수 이전 알림</h3>
+            <p className="text-xs text-slate-500 leading-5">
+              인증 로그인 이전에 게스트 모드로 플레이하여 누적된 점수{' '}
+              <span className="font-extrabold text-[#1e6068]">{pendingMigrationScore}점</span> 및 골드/아이템 정보가 감지되었습니다. 
+              이 기록을 현재 로그인한 계정으로 이전하여 합산하시겠습니까?
+            </p>
+            <div className="flex gap-3 mt-2">
+              <button
+                onClick={async () => {
+                  await migrateGuestScore(false);
+                  await fetchLeaderboard();
+                }}
+                className="flex-1 py-3 bg-slate-100 hover:bg-slate-200 text-slate-500 hover:text-slate-700 font-bold text-xs rounded-xl cursor-pointer transition-colors border border-slate-200"
+              >
+                아니오 (삭제)
+              </button>
+              <button
+                onClick={async () => {
+                  await migrateGuestScore(true);
+                  await fetchLeaderboard();
+                }}
+                className="flex-1 py-3 bg-[#AECFD4] hover:bg-[#96c4c9] text-[#1e3a47] font-black text-xs rounded-xl shadow-sm cursor-pointer transition-all"
+              >
+                예 (합산 이전)
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Drag overlay rendering (Rendered at top-level container to avoid coordinate offsets from parent CSS transforms) */}
+      {draggedIdx !== null && blockPool[draggedIdx] && (
+        <div 
+          className="fixed pointer-events-none z-50 drop-shadow-lg"
+          style={{
+            left: `${dragPos.x - dragOffset.x}px`,
+            top: `${dragPos.y - dragOffset.y}px`,
+            width: `${blockPool[draggedIdx]!.width * 38}px`,
+            height: `${blockPool[draggedIdx]!.height * 38}px`
+          }}
+        >
+          <div 
+            className="grid gap-1 scale-[1.05]"
+            style={{
+              gridTemplateColumns: `repeat(${blockPool[draggedIdx]!.shape[0].length}, minmax(0, 1fr))`
+            }}
+          >
+            {blockPool[draggedIdx]!.shape.map((row, r) => 
+              row.map((cell, c) => (
+                <div 
+                  key={`${r}-${c}`}
+                  className={`w-8 h-8 rounded-lg transition-all ${
+                    cell === 1 
+                      ? `bg-gradient-to-br ${blockPool[draggedIdx]!.color} border border-white/30 shadow-md opacity-90` 
+                      : 'bg-transparent'
+                  }`}
+                />
+              ))
+            )}
+          </div>
+        </div>
+      )}
+
+    </div>
+  );
 }

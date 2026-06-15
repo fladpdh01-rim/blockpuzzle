@@ -43,42 +43,42 @@ export default function AuthPage() {
 
   if (loading) {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-zinc-950 text-zinc-100">
+      <div className="min-h-screen flex items-center justify-center bg-gradient-to-b from-[#f7fafd] to-[#eef3f7] text-[#1e3a47]">
         <div className="flex flex-col items-center gap-3">
-          <div className="w-10 h-10 border-4 border-indigo-500 border-t-transparent rounded-full animate-spin"></div>
-          <p className="text-sm text-zinc-400 font-semibold">로딩 중...</p>
+          <div className="w-10 h-10 border-4 border-[#AECFD4] border-t-transparent rounded-full animate-spin"></div>
+          <p className="text-sm text-slate-400 font-semibold">로딩 중...</p>
         </div>
       </div>
     );
   }
 
   return (
-    <div className="min-h-screen flex items-center justify-center bg-zinc-950 px-4 py-12 relative overflow-hidden">
-      {/* 백그라운드 오라 효과 */}
-      <div className="absolute top-1/4 left-1/4 w-96 h-96 bg-indigo-500/10 rounded-full blur-[100px] pointer-events-none"></div>
-      <div className="absolute bottom-1/4 right-1/4 w-96 h-96 bg-pink-500/10 rounded-full blur-[100px] pointer-events-none"></div>
+    <div className="min-h-screen flex items-center justify-center bg-gradient-to-b from-[#f7fafd] to-[#eef3f7] px-4 py-12 relative overflow-hidden">
+      {/* 백그라운드 오라 효과 (파스텔 블루/핑크 슬레이트) */}
+      <div className="absolute top-1/4 left-1/4 w-96 h-96 bg-[#AECFD4]/10 rounded-full blur-[100px] pointer-events-none"></div>
+      <div className="absolute bottom-1/4 right-1/4 w-96 h-96 bg-pink-400/5 rounded-full blur-[100px] pointer-events-none"></div>
 
-      <div className="w-full max-w-md bg-zinc-900/60 border border-zinc-800 p-8 rounded-3xl shadow-2xl backdrop-blur-md flex flex-col items-center gap-8 animate-pop-in relative z-10">
+      <div className="w-full max-w-md bg-white border border-slate-100 p-8 rounded-3xl shadow-2xl flex flex-col items-center gap-8 animate-pop-in relative z-10">
         
         {/* 뒤로가기 버튼 */}
         <Link 
           href="/" 
-          className="self-start text-xs text-zinc-400 hover:text-zinc-200 transition-colors flex items-center gap-1.5"
+          className="self-start text-xs text-slate-400 hover:text-slate-600 transition-colors flex items-center gap-1.5"
         >
           ← 홈으로 돌아가기
         </Link>
 
         {/* 헤더 */}
         <div className="text-center">
-          <h1 className="text-3xl font-black bg-gradient-to-r from-indigo-400 via-purple-400 to-pink-500 bg-clip-text text-transparent">
+          <h1 className="text-3xl font-black text-[#1e3a47]">
             SIGN IN
           </h1>
-          <p className="text-zinc-400 text-xs mt-2 font-medium">로그인하고 랭킹 경쟁과 내 최고 기록을 관리하세요!</p>
+          <p className="text-slate-400 text-xs mt-2 font-semibold leading-5">로그인하고 랭킹 경쟁과 내 최고 기록을 관리하세요!</p>
         </div>
 
         {/* 에러 피드백 */}
         {errorMessage && (
-          <div className="w-full bg-red-500/10 border border-red-500/20 text-red-400 text-xs p-3.5 rounded-xl text-center">
+          <div className="w-full bg-rose-50 border border-rose-100 text-rose-600 text-xs p-3.5 rounded-xl text-center font-semibold">
             ⚠️ {errorMessage}
           </div>
         )}
@@ -88,10 +88,10 @@ export default function AuthPage() {
           <button
             onClick={handleGoogleLogin}
             disabled={authLoading}
-            className="w-full py-4 bg-white text-zinc-900 hover:bg-zinc-100 font-extrabold text-base rounded-2xl shadow-lg transition-all flex items-center justify-center gap-3 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+            className="w-full py-4 bg-white hover:bg-slate-50 text-slate-700 border border-slate-200 font-extrabold text-base rounded-2xl shadow-sm transition-all flex items-center justify-center gap-3 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
           >
             {authLoading ? (
-              <div className="w-5 h-5 border-2 border-zinc-900 border-t-transparent rounded-full animate-spin"></div>
+              <div className="w-5 h-5 border-2 border-slate-750 border-t-transparent rounded-full animate-spin"></div>
             ) : (
               // 구글 로고 SVG
               <svg className="w-5 h-5" viewBox="0 0 24 24">
@@ -118,7 +118,7 @@ export default function AuthPage() {
         </div>
 
         {/* 하단 캡션 */}
-        <div className="text-center text-[10px] text-zinc-500">
+        <div className="text-center text-[10px] text-slate-400 font-semibold leading-4">
           계정이 없는 경우 구글 로그인과 동시에 자동으로 회원가입이 완료됩니다.
         </div>
 
