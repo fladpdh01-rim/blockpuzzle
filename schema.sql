@@ -39,9 +39,9 @@ BEGIN
   VALUES (new.id, new.email)
   ON CONFLICT (id) DO NOTHING;
 
-  -- 2. user_scores에 누적 점수 0으로 초기화 생성
-  INSERT INTO public.user_scores (id, total_score)
-  VALUES (new.id, 0)
+  -- 2. user_scores에 누적 점수 0으로 초기화 생성 (기본 재화/아이템 모두 0 또는 false)
+  INSERT INTO public.user_scores (id, total_score, gold, hints, block_changes, has_bought_item_set, has_bought_time_sale)
+  VALUES (new.id, 0, 0, 0, 0, false, false)
   ON CONFLICT (id) DO NOTHING;
 
   RETURN new;
@@ -105,6 +105,10 @@ CREATE POLICY "인증된 사용자는 본인의 게임 기록만 삽입 가능"
   TO authenticated
   WITH CHECK (auth.uid() = user_id);
 
--- user_scores 테이블에 gold 컬럼 추가 (기본값 0)
+-- user_scores 테이블에 gold, hints, block_changes, 패키지 정보 컬럼 추가
 ALTER TABLE public.user_scores ADD COLUMN IF NOT EXISTS gold INTEGER DEFAULT 0 NOT NULL;
+ALTER TABLE public.user_scores ADD COLUMN IF NOT EXISTS hints INTEGER DEFAULT 0 NOT NULL;
+ALTER TABLE public.user_scores ADD COLUMN IF NOT EXISTS block_changes INTEGER DEFAULT 0 NOT NULL;
+ALTER TABLE public.user_scores ADD COLUMN IF NOT EXISTS has_bought_item_set BOOLEAN DEFAULT false NOT NULL;
+ALTER TABLE public.user_scores ADD COLUMN IF NOT EXISTS has_bought_time_sale BOOLEAN DEFAULT false NOT NULL;
 

@@ -83,11 +83,27 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     }
   };
 
-  // 로컬 스토리지에 아이템 정보 저장
-  const saveUserItems = (id: string, isGuestUser: boolean, items: { blockChanges: number; hints: number; hasBoughtItemSet: boolean; hasBoughtTimeSale: boolean }) => {
+  // 로컬 스토리지 및 DB에 아이템 정보 저장
+  const saveUserItems = async (id: string, isGuestUser: boolean, items: { blockChanges: number; hints: number; hasBoughtItemSet: boolean; hasBoughtTimeSale: boolean }) => {
     if (typeof window === 'undefined') return;
     const key = isGuestUser ? 'block_puzzle_guestItems' : `block_puzzle_items_${id}`;
     localStorage.setItem(key, JSON.stringify(items));
+
+    if (!isGuestUser && id) {
+      try {
+        await supabase
+          .from('user_scores')
+          .update({
+            hints: items.hints,
+            block_changes: items.blockChanges,
+            has_bought_item_set: items.hasBoughtItemSet,
+            has_bought_time_sale: items.hasBoughtTimeSale
+          })
+          .eq('id', id);
+      } catch (e) {
+        console.error('Failed to sync items to DB:', e);
+      }
+    }
   };
 
   // 1. 게스트 ID 초기 생성/조회 및 게스트 점수/골드/아이템 로드
@@ -174,18 +190,18 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     };
   }, []);
 
-  // DB에서 사용자의 total_score 및 gold 조회
+  // DB에서 사용자의 total_score 및 gold/아이템/패키지 기록 조회
   const fetchDbUserScore = async (userId: string) => {
     try {
       let { data, error } = await supabase
         .from('user_scores')
-        .select('total_score, gold')
+        .select('total_score, gold, hints, block_changes, has_bought_item_set, has_bought_time_sale')
         .eq('id', userId)
         .single();
       
-      // self-healing: gold 컬럼이 DB에 없으면 total_score만 다시 조회
-      if (error && error.message && (error.message.includes('column') || error.message.includes('not found') || error.message.includes('gold'))) {
-        console.warn('gold column not found in database. Using local fallback.');
+      // self-healing: 신규 컬럼이 DB에 없으면 total_score만 다시 조회
+      if (error && error.message && (error.message.includes('column') || error.message.includes('not found') || error.message.includes('gold') || error.message.includes('hints') || error.message.includes('block_changes'))) {
+        console.warn('New columns not found in database. Using local fallback.');
         const fallbackRes = await supabase
           .from('user_scores')
           .select('total_score')
@@ -193,7 +209,14 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           .single();
         
         if (fallbackRes.data) {
-          data = { total_score: fallbackRes.data.total_score, gold: null };
+          data = { 
+            total_score: fallbackRes.data.total_score, 
+            gold: null, 
+            hints: null, 
+            block_changes: null, 
+            has_bought_item_set: null, 
+            has_bought_time_sale: null 
+          };
           error = null;
         }
       }
@@ -204,6 +227,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         setUserScore(data.total_score);
         localStorage.setItem('block_puzzle_myScore', data.total_score.toString());
         
+        // Gold
         if (data.gold !== null && data.gold !== undefined) {
           setGold(data.gold);
           localStorage.setItem(`block_puzzle_gold_${userId}`, data.gold.toString());
@@ -211,6 +235,82 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           const localGold = localStorage.getItem(`block_puzzle_gold_${userId}`);
           setGold(localGold && localGold !== '1000' ? parseInt(localGold, 10) : 0); // 기본 0골드
         }
+
+        // Hints
+        if (data.hints !== null && data.hints !== undefined) {
+          setHints(data.hints);
+        } else {
+          const stored = localStorage.getItem(`block_puzzle_items_${userId}`);
+          if (stored) {
+            try {
+              const parsed = JSON.parse(stored);
+              setHints(parsed.hints ?? 0);
+            } catch (e) {
+              setHints(0);
+            }
+          } else {
+            setHints(0);
+          }
+        }
+
+        // Block Changes
+        if (data.block_changes !== null && data.block_changes !== undefined) {
+          setBlockChanges(data.block_changes);
+        } else {
+          const stored = localStorage.getItem(`block_puzzle_items_${userId}`);
+          if (stored) {
+            try {
+              const parsed = JSON.parse(stored);
+              setBlockChanges(parsed.blockChanges ?? 0);
+            } catch (e) {
+              setBlockChanges(0);
+            }
+          } else {
+            setBlockChanges(0);
+          }
+        }
+
+        // Package item set
+        if (data.has_bought_item_set !== null && data.has_bought_item_set !== undefined) {
+          setHasBoughtItemSet(data.has_bought_item_set);
+        } else {
+          const stored = localStorage.getItem(`block_puzzle_items_${userId}`);
+          if (stored) {
+            try {
+              const parsed = JSON.parse(stored);
+              setHasBoughtItemSet(parsed.hasBoughtItemSet ?? false);
+            } catch (e) {
+              setHasBoughtItemSet(false);
+            }
+          } else {
+            setHasBoughtItemSet(false);
+          }
+        }
+
+        // Package time sale
+        if (data.has_bought_time_sale !== null && data.has_bought_time_sale !== undefined) {
+          setHasBoughtTimeSale(data.has_bought_time_sale);
+        } else {
+          const stored = localStorage.getItem(`block_puzzle_items_${userId}`);
+          if (stored) {
+            try {
+              const parsed = JSON.parse(stored);
+              setHasBoughtTimeSale(parsed.hasBoughtTimeSale ?? false);
+            } catch (e) {
+              setHasBoughtTimeSale(false);
+            }
+          } else {
+            setHasBoughtTimeSale(false);
+          }
+        }
+
+        // Sync local storage item cache in all cases
+        saveUserItems(userId, false, {
+          blockChanges: data.block_changes ?? blockChanges,
+          hints: data.hints ?? hints,
+          hasBoughtItemSet: data.has_bought_item_set ?? hasBoughtItemSet,
+          hasBoughtTimeSale: data.has_bought_time_sale ?? hasBoughtTimeSale
+        });
       }
     } catch (e) {
       console.error(e);
@@ -246,12 +346,16 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           .update({ 
             total_score: nextScore, 
             gold, 
+            hints,
+            block_changes: blockChanges,
+            has_bought_item_set: hasBoughtItemSet,
+            has_bought_time_sale: hasBoughtTimeSale,
             updated_at: new Date().toISOString() 
           })
           .eq('id', user.id);
 
         if (scoreErr) {
-          // gold 컬럼이 없을 때를 대비해 total_score만 다시 시도
+          // 컬럼이 없을 때를 대비해 total_score만 다시 시도
           await supabase
             .from('user_scores')
             .update({ total_score: nextScore, updated_at: new Date().toISOString() })
@@ -326,6 +430,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           .update({ 
             total_score: mergedScore, 
             gold: mergedGold,
+            hints: mergedHints,
+            block_changes: mergedBlockChanges,
+            has_bought_item_set: hasBoughtItemSet,
+            has_bought_time_sale: hasBoughtTimeSale,
             updated_at: new Date().toISOString() 
           })
           .eq('id', user.id);
