@@ -124,12 +124,12 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   // 2. Supabase Auth 감시 리스너
   useEffect(() => {
     // 세션 조회
-    supabase.auth.getSession().then((res: any) => {
+    supabase.auth.getSession().then(async (res: any) => {
       const session = res?.data?.session;
       const currentUser = session?.user ?? null;
       setUser(currentUser);
       if (currentUser) {
-        fetchDbUserScore(currentUser.id);
+        await fetchDbUserScore(currentUser.id);
         loadUserItems(currentUser.id, false);
       } else {
         loadGuestScore();
@@ -140,32 +140,33 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     });
 
     // 상태 변화 감지 리스너
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((event: any, session: any) => {
+    const { data: { subscription } } = supabase.auth.onAuthStateChange(async (event: any, session: any) => {
       const currentUser = session?.user ?? null;
       setUser(currentUser);
 
       if (event === 'SIGNED_IN' && currentUser) {
-        fetchDbUserScore(currentUser.id).then(() => {
-          // 게스트 모드에서 누적되었던 점수, 골드, 아이템이 있는지 검사하여 마이그레이션 제안
-          const gScoreStr = localStorage.getItem('block_puzzle_guestScore');
-          const gScore = gScoreStr ? parseInt(gScoreStr, 10) : 0;
-          
-          const gGoldStr = localStorage.getItem('block_puzzle_guestGold');
-          const gGold = gGoldStr ? parseInt(gGoldStr, 10) : 0;
+        setLoading(true); // 데이터 패치 시작 시 로딩 상태로 변경
+        await fetchDbUserScore(currentUser.id);
+        
+        // 게스트 모드에서 누적되었던 점수, 골드, 아이템이 있는지 검사하여 마이그레이션 제안
+        const gScoreStr = localStorage.getItem('block_puzzle_guestScore');
+        const gScore = gScoreStr ? parseInt(gScoreStr, 10) : 0;
+        
+        const gGoldStr = localStorage.getItem('block_puzzle_guestGold');
+        const gGold = gGoldStr ? parseInt(gGoldStr, 10) : 0;
 
-          const gItemsStr = localStorage.getItem('block_puzzle_guestItems');
-          let gItems = { blockChanges: 0, hints: 0, hasBoughtItemSet: false, hasBoughtTimeSale: false };
-          if (gItemsStr) {
-            try { gItems = JSON.parse(gItemsStr); } catch (e) {}
-          }
+        const gItemsStr = localStorage.getItem('block_puzzle_guestItems');
+        let gItems = { blockChanges: 0, hints: 0, hasBoughtItemSet: false, hasBoughtTimeSale: false };
+        if (gItemsStr) {
+          try { gItems = JSON.parse(gItemsStr); } catch (e) {}
+        }
 
-          if (gScore > 0 || gGold > 0 || gItems.blockChanges > 0 || gItems.hints > 0 || gItems.hasBoughtItemSet) {
-            setPendingMigrationScore(gScore);
-            setPendingMigrationGold(gGold);
-            setPendingMigrationBlockChanges(gItems.blockChanges);
-            setPendingMigrationHints(gItems.hints);
-          }
-        });
+        if (gScore > 0 || gGold > 0 || gItems.blockChanges > 0 || gItems.hints > 0 || gItems.hasBoughtItemSet) {
+          setPendingMigrationScore(gScore);
+          setPendingMigrationGold(gGold);
+          setPendingMigrationBlockChanges(gItems.blockChanges);
+          setPendingMigrationHints(gItems.hints);
+        }
         loadUserItems(currentUser.id, false);
       } else if (event === 'SIGNED_OUT') {
         setUserScore(0);
@@ -625,21 +626,78 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   const completePurchase = async (itemType: 'itemset' | 'gold5000' | 'gold10000') => {
     if (itemType === 'itemset') {
+      let currentBlockChanges = 0;
+      let currentHints = 0;
+      let currentTimeSale = false;
+
+      if (user) {
+        // DB에서 최신 데이터 직접 확인
+        const { data } = await supabase
+          .from('user_scores')
+          .select('block_changes, hints, has_bought_time_sale')
+          .eq('id', user.id)
+          .single();
+        
+        if (data) {
+          currentBlockChanges = data.block_changes ?? 0;
+          currentHints = data.hints ?? 0;
+          currentTimeSale = data.has_bought_time_sale ?? false;
+        } else {
+          const stored = localStorage.getItem(`block_puzzle_items_${user.id}`);
+          if (stored) {
+            try {
+              const parsed = JSON.parse(stored);
+              currentBlockChanges = parsed.blockChanges ?? 0;
+              currentHints = parsed.hints ?? 0;
+              currentTimeSale = parsed.hasBoughtTimeSale ?? false;
+            } catch (e) {}
+          }
+        }
+      } else {
+        const stored = localStorage.getItem('block_puzzle_guestItems');
+        if (stored) {
+          try {
+            const parsed = JSON.parse(stored);
+            currentBlockChanges = parsed.blockChanges ?? 0;
+            currentHints = parsed.hints ?? 0;
+            currentTimeSale = parsed.hasBoughtTimeSale ?? false;
+          } catch (e) {}
+        }
+      }
+
       const nextHasBoughtItemSet = true;
-      const nextBlockChanges = blockChanges + 20;
-      const nextHints = hints + 20;
+      const nextBlockChanges = currentBlockChanges + 20;
+      const nextHints = currentHints + 20;
 
       setHasBoughtItemSet(nextHasBoughtItemSet);
       setBlockChanges(nextBlockChanges);
       setHints(nextHints);
 
       if (user) {
-        saveUserItems(user.id, false, { blockChanges: nextBlockChanges, hints: nextHints, hasBoughtItemSet: nextHasBoughtItemSet, hasBoughtTimeSale });
+        await saveUserItems(user.id, false, { blockChanges: nextBlockChanges, hints: nextHints, hasBoughtItemSet: nextHasBoughtItemSet, hasBoughtTimeSale: currentTimeSale });
       } else {
-        saveUserItems('', true, { blockChanges: nextBlockChanges, hints: nextHints, hasBoughtItemSet: nextHasBoughtItemSet, hasBoughtTimeSale });
+        await saveUserItems('', true, { blockChanges: nextBlockChanges, hints: nextHints, hasBoughtItemSet: nextHasBoughtItemSet, hasBoughtTimeSale: currentTimeSale });
       }
     } else if (itemType === 'gold10000') {
-      const nextGold = gold + 10000;
+      let currentGold = 0;
+      if (user) {
+        const { data } = await supabase
+          .from('user_scores')
+          .select('gold')
+          .eq('id', user.id)
+          .single();
+        if (data) {
+          currentGold = data.gold ?? 0;
+        } else {
+          const storedGold = localStorage.getItem(`block_puzzle_gold_${user.id}`);
+          currentGold = storedGold ? parseInt(storedGold, 10) : 0;
+        }
+      } else {
+        const gGoldStr = localStorage.getItem('block_puzzle_guestGold');
+        currentGold = gGoldStr ? parseInt(gGoldStr, 10) : 0;
+      }
+
+      const nextGold = currentGold + 10000;
       setGold(nextGold);
       if (user) {
         localStorage.setItem(`block_puzzle_gold_${user.id}`, nextGold.toString());
@@ -648,7 +706,25 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         localStorage.setItem('block_puzzle_guestGold', nextGold.toString());
       }
     } else if (itemType === 'gold5000') {
-      const nextGold = gold + 5000;
+      let currentGold = 0;
+      if (user) {
+        const { data } = await supabase
+          .from('user_scores')
+          .select('gold')
+          .eq('id', user.id)
+          .single();
+        if (data) {
+          currentGold = data.gold ?? 0;
+        } else {
+          const storedGold = localStorage.getItem(`block_puzzle_gold_${user.id}`);
+          currentGold = storedGold ? parseInt(storedGold, 10) : 0;
+        }
+      } else {
+        const gGoldStr = localStorage.getItem('block_puzzle_guestGold');
+        currentGold = gGoldStr ? parseInt(gGoldStr, 10) : 0;
+      }
+
+      const nextGold = currentGold + 5000;
       setGold(nextGold);
       if (user) {
         localStorage.setItem(`block_puzzle_gold_${user.id}`, nextGold.toString());
