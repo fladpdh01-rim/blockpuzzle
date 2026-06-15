@@ -5,6 +5,7 @@ import { useAuth } from '../context/AuthContext';
 import { supabase } from '../lib/supabaseClient';
 import Link from 'next/link';
 import { loadTossPayments } from '@tosspayments/tosspayments-sdk';
+import ErrorBoundary from '../components/ErrorBoundary';
 
 // ==========================================
 // 1. Types & Data Definitions
@@ -300,6 +301,103 @@ function balanceBlocks(blocks: { shape: number[][]; color: string }[]) {
   return blocks;
 }
 
+// KPI Card count-up number component
+function AnimatedCounter({ value, enabled = true }: { value: number; enabled?: boolean }) {
+  const [displayValue, setDisplayValue] = useState(0);
+  
+  useEffect(() => {
+    if (!enabled) {
+      setDisplayValue(value);
+      return;
+    }
+    
+    let start = 0;
+    const duration = 1000; // 1 second
+    const stepTime = 16; // ~60fps
+    const totalSteps = Math.ceil(duration / stepTime);
+    const increment = value / totalSteps;
+    let currentStep = 0;
+    
+    const timer = setInterval(() => {
+      currentStep++;
+      if (currentStep >= totalSteps) {
+        setDisplayValue(value);
+        clearInterval(timer);
+      } else {
+        start += increment;
+        setDisplayValue(Math.floor(start));
+      }
+    }, stepTime);
+    
+    return () => clearInterval(timer);
+  }, [value, enabled]);
+
+  return <>{displayValue.toLocaleString()}</>;
+}
+
+// League/Rank progress chart component
+function RankProgressChart({ score }: { score: number }) {
+  let currentTier = 'Platinum I';
+  let nextTier = 'Diamond I';
+  let percentage = 0;
+  let text = '';
+
+  if (score < 800) {
+    currentTier = 'Platinum I';
+    nextTier = 'Diamond I';
+    percentage = (score / 800) * 100;
+    text = `${score} / 800`;
+  } else if (score < 1200) {
+    currentTier = 'Diamond I';
+    nextTier = 'Diamond II';
+    percentage = ((score - 800) / (1200 - 800)) * 100;
+    text = `${score} / 1200`;
+  } else if (score < 1800) {
+    currentTier = 'Diamond II';
+    nextTier = 'Diamond III';
+    percentage = ((score - 1200) / (1800 - 1200)) * 100;
+    text = `${score} / 1800`;
+  } else if (score < 2450) {
+    currentTier = 'Diamond III';
+    nextTier = 'Pro League';
+    percentage = ((score - 1800) / (2450 - 1800)) * 100;
+    text = `${score} / 2450`;
+  } else {
+    currentTier = 'Pro League';
+    nextTier = 'Max Tier 🎉';
+    percentage = 100;
+    text = `${score} 점 (PRO)`;
+  }
+
+  const [animatedWidth, setAnimatedWidth] = useState(0);
+
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      setAnimatedWidth(percentage);
+    }, 150);
+    return () => clearTimeout(timer);
+  }, [percentage]);
+
+  return (
+    <div className="flex flex-col gap-2 w-full mt-4 bg-slate-50 border border-slate-100 p-5 rounded-2xl">
+      <div className="flex justify-between items-center text-xs font-bold">
+        <span className="text-[#1e3a47]">{currentTier}</span>
+        <span className="text-slate-400 font-medium">다음 리그: {nextTier}</span>
+      </div>
+      <div className="w-full h-3.5 bg-slate-200/50 rounded-full overflow-hidden relative shadow-inner">
+        <div
+          className="h-full bg-gradient-to-r from-[#AECFD4] to-[#1e6068] rounded-full transition-all duration-1000 ease-out shadow-sm"
+          style={{ width: `${animatedWidth}%` }}
+        />
+      </div>
+      <div className="flex justify-between items-center text-[10px] text-slate-400 font-bold uppercase mt-1">
+        <span>리그 진행도</span>
+        <span>{text} 점 ({Math.floor(percentage)}%)</span>
+      </div>
+    </div>
+  );
+}
+
 export default function BlockPuzzleGame() {
   // ==========================================
   // 2. States & Auth Context
@@ -314,6 +412,7 @@ export default function BlockPuzzleGame() {
     hints,
     hasBoughtItemSet,
     hasBoughtTimeSale,
+    loading,
     signOut,
     updateUserScore,
     purchaseItem,
@@ -384,6 +483,11 @@ export default function BlockPuzzleGame() {
   const [rank, setRank] = useState<number>(1);
   const [isNewRecord, setIsNewRecord] = useState<boolean>(false);
   
+  // 추가된 UI/UX 개선 상태
+  const [leaderboardLoading, setLeaderboardLoading] = useState<boolean>(false);
+  const [animationsEnabled, setAnimationsEnabled] = useState<boolean>(true);
+  const [aiGeneratingProgress, setAiGeneratingProgress] = useState<number>(0);
+  
   // 타이머 및 경고 알림
   const [time, setTime] = useState<number>(0);
   const [timerActive, setTimerActive] = useState<boolean>(false);
@@ -409,6 +513,7 @@ export default function BlockPuzzleGame() {
 
   // Supabase 실시간 리더보드 동기화 (is_guest = false 대상)
   const fetchLeaderboard = async (overrideScore?: number) => {
+    setLeaderboardLoading(true);
     try {
       const res = await fetch('/api/leaderboard');
       if (res.ok) {
@@ -435,6 +540,10 @@ export default function BlockPuzzleGame() {
       }
     } catch (e) {
       console.error('리더보드 조회 오류:', e);
+    } finally {
+      setTimeout(() => {
+        setLeaderboardLoading(false);
+      }, 500);
     }
   };
 
@@ -443,10 +552,38 @@ export default function BlockPuzzleGame() {
     fetchLeaderboard();
   }, [user]);
 
+  // AI 블록 생성 프로그레스 시뮬레이션
+  useEffect(() => {
+    let progressTimer: NodeJS.Timeout | null = null;
+    if (aiGenerating) {
+      setAiGeneratingProgress(0);
+      progressTimer = setInterval(() => {
+        setAiGeneratingProgress((prev) => {
+          if (prev >= 95) return 95;
+          const inc = Math.floor(Math.random() * 8) + 4; // 4% ~ 11%씩 증가
+          return Math.min(prev + inc, 95);
+        });
+      }, 250);
+    } else {
+      setAiGeneratingProgress(100);
+    }
+    return () => {
+      if (progressTimer) clearInterval(progressTimer);
+    };
+  }, [aiGenerating]);
+
   // ==========================================
   // 3. Initial Load & Storage Sync
   // ==========================================
   useEffect(() => {
+    // 애니메이션 활성화 선호도 로드
+    if (typeof window !== 'undefined') {
+      const savedAnim = localStorage.getItem('block_puzzle_animationsEnabled');
+      if (savedAnim !== null) {
+        setAnimationsEnabled(savedAnim === 'true');
+      }
+    }
+
     // 플레이어 랭킹 로드
     const storedPlayers = localStorage.getItem('block_puzzle_players');
     if (storedPlayers) {
@@ -582,6 +719,7 @@ export default function BlockPuzzleGame() {
     // 모달을 닫고 AI 생성 모드 진입
     setShowDiffModal(false);
     setAiGenerating(true);
+    setAiGeneratingProgress(0); // AI 생성 진행도 초기화
     setScreen('playing');
     setActiveTab('play');
 
@@ -1465,11 +1603,26 @@ export default function BlockPuzzleGame() {
   const renderPlayingScreen = () => {
     if (aiGenerating) {
       return (
-        <div className="min-h-[60vh] flex flex-col items-center justify-center gap-5 text-center animate-pop-in">
-          <div className="w-10 h-10 border-4 border-[#AECFD4] border-t-transparent rounded-full animate-spin"></div>
-          <div className="flex flex-col gap-1">
+        <div className="min-h-[60vh] flex flex-col items-center justify-center gap-6 text-center animate-fade-in-up w-full max-w-md mx-auto">
+          <div className="w-12 h-12 border-4 border-[#AECFD4] border-t-transparent rounded-full animate-spin"></div>
+          
+          <div className="flex flex-col gap-2 w-full">
             <p className="text-base font-extrabold text-[#1e3a47]">Gemini AI가 블록을 조각하는 중...</p>
-            <p className="text-xs text-slate-400 max-w-xs leading-5">목표 틀을 완벽하게 채울 수 있는 최적의 블록을 생성하고 있습니다.</p>
+            <p className="text-xs text-slate-400 max-w-xs leading-5 mx-auto">목표 틀을 완벽하게 채울 수 있는 최적의 블록셋을 생성하고 있습니다.</p>
+          </div>
+
+          {/* AI Progress Bar */}
+          <div className="w-full bg-slate-105 border border-slate-200/50 p-4 rounded-2xl flex flex-col gap-2 mt-2 sky-panel">
+            <div className="w-full h-3 bg-slate-200 rounded-full overflow-hidden relative shadow-inner">
+              <div 
+                className="h-full bg-gradient-to-r from-[#AECFD4] to-[#1e6068] rounded-full transition-all duration-300 ease-out"
+                style={{ width: `${aiGeneratingProgress}%` }}
+              />
+            </div>
+            <div className="flex justify-between items-center text-[10px] text-slate-400 font-bold uppercase mt-1">
+              <span>블록 분석 진행도</span>
+              <span>{aiGeneratingProgress}%</span>
+            </div>
           </div>
         </div>
       );
@@ -1952,11 +2105,89 @@ export default function BlockPuzzleGame() {
   // ------------------------------------------
   // LEADERBOARD TAB CONTENT
   // ------------------------------------------
+  // ------------------------------------------
+  // LEADERBOARD SKELETON & PROFILE SKELETON
+  // ------------------------------------------
+  const renderLeaderboardSkeleton = () => {
+    return (
+      <div className="w-full max-w-lg mx-auto flex flex-col gap-6 mt-4">
+        <div className="text-center flex flex-col gap-1.5 animate-pulse">
+          <div className="h-8 w-48 bg-slate-200 rounded-lg mx-auto skeleton-shimmer"></div>
+          <div className="h-3 w-64 bg-slate-100 rounded mx-auto skeleton-shimmer mt-1"></div>
+        </div>
+
+        <div className="sky-panel rounded-3xl overflow-hidden w-full">
+          <div className="px-6 py-4 bg-slate-50/50 border-b border-slate-100 flex items-center justify-between">
+            <div className="h-3.5 w-24 bg-slate-200 rounded skeleton-shimmer"></div>
+            <div className="h-3.5 w-16 bg-slate-200 rounded skeleton-shimmer"></div>
+          </div>
+
+          <div className="flex flex-col">
+            {[1, 2, 3, 4, 5].map((i) => (
+              <div 
+                key={i} 
+                className="flex items-center justify-between px-6 py-4 border-b border-slate-100/60"
+              >
+                <div className="flex items-center gap-4">
+                  <div className="w-8 h-8 rounded-full bg-slate-100 skeleton-shimmer"></div>
+                  <div className="flex flex-col gap-1.5">
+                    <div className="h-4 w-24 bg-slate-200 rounded skeleton-shimmer"></div>
+                    <div className="h-2.5 w-16 bg-slate-100 rounded skeleton-shimmer"></div>
+                  </div>
+                </div>
+                <div className="h-4 w-16 bg-slate-200 rounded skeleton-shimmer"></div>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+    );
+  };
+
+  const renderProfileSkeleton = () => {
+    return (
+      <div className="w-full max-w-md mx-auto flex flex-col gap-6 mt-4">
+        <div className="text-center flex flex-col gap-1.5 animate-pulse">
+          <div className="h-8 w-56 bg-slate-200 rounded-lg mx-auto skeleton-shimmer"></div>
+          <div className="h-3 w-40 bg-slate-100 rounded mx-auto skeleton-shimmer mt-1"></div>
+        </div>
+
+        <div className="sky-panel p-6 rounded-3xl flex flex-col gap-6 w-full">
+          <div className="flex items-center gap-4 border-b border-slate-100 pb-4">
+            <div className="w-14 h-14 rounded-full bg-slate-200 skeleton-shimmer"></div>
+            <div className="flex flex-col gap-2">
+              <div className="h-4.5 w-28 bg-slate-200 rounded skeleton-shimmer"></div>
+              <div className="h-3.5 w-16 bg-slate-100 rounded-full skeleton-shimmer"></div>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-2 gap-4">
+            <div className="p-4 rounded-2xl border border-slate-100 bg-slate-50 flex flex-col gap-2">
+              <div className="h-3 w-16 bg-slate-200 rounded skeleton-shimmer"></div>
+              <div className="h-5 w-24 bg-slate-300 rounded skeleton-shimmer"></div>
+            </div>
+            <div className="p-4 rounded-2xl border border-slate-100 bg-slate-50 flex flex-col gap-2">
+              <div className="h-3 w-16 bg-slate-200 rounded skeleton-shimmer"></div>
+              <div className="h-5 w-12 bg-slate-300 rounded skeleton-shimmer"></div>
+            </div>
+          </div>
+
+          <div className="h-10 w-full bg-slate-200 rounded-2xl skeleton-shimmer mt-2"></div>
+        </div>
+      </div>
+    );
+  };
+
+  // ------------------------------------------
+  // LEADERBOARD TAB CONTENT
+  // ------------------------------------------
   const renderLeaderboardTab = () => {
+    if (leaderboardLoading) return renderLeaderboardSkeleton();
+
     const sorted = [...players].sort((a, b) => b.score - a.score);
     
     return (
-      <div className="w-full max-w-lg mx-auto flex flex-col gap-6 animate-pop-in mt-4">
+      <div className="w-full max-w-lg mx-auto flex flex-col gap-6 animate-fade-in-up mt-4">
         <div className="text-center flex flex-col gap-1.5">
           <h2 className="text-3xl font-extrabold text-[#1e3a47]">LEADERBOARD</h2>
           <p className="text-xs text-slate-500">실시간 글로벌 플레이어 누적 점수 순위</p>
@@ -1981,7 +2212,7 @@ export default function BlockPuzzleGame() {
                   className={`flex items-center justify-between px-6 py-4 border-b border-slate-100/60 ${rowBg}`}
                 >
                   <div className="flex items-center gap-4">
-                    <div className={`w-8 h-8 rounded-full flex items-center justify-center font-bold text-sm shadow-sm ${badgeBg}`}>
+                     <div className={`w-8 h-8 rounded-full flex items-center justify-center font-bold text-sm shadow-sm ${badgeBg}`}>
                       {idx + 1}
                     </div>
                     <div className="flex flex-col">
@@ -2007,8 +2238,10 @@ export default function BlockPuzzleGame() {
   // PROFILE TAB CONTENT
   // ------------------------------------------
   const renderProfileTab = () => {
+    if (loading) return renderProfileSkeleton();
+
     return (
-      <div className="w-full max-w-md mx-auto flex flex-col gap-6 animate-pop-in mt-4">
+      <div className="w-full max-w-md mx-auto flex flex-col gap-6 animate-fade-in-up mt-4">
         <div className="text-center flex flex-col gap-1.5">
           <h2 className="text-3xl font-extrabold text-[#1e3a47]">PROFILE & SETTINGS</h2>
           <p className="text-xs text-slate-500">인증 정보 관리 및 게임 통계</p>
@@ -2043,14 +2276,40 @@ export default function BlockPuzzleGame() {
 
           {/* Statistics summary */}
           <div className="grid grid-cols-2 gap-4">
-            <div className="bg-slate-50 p-4 rounded-2xl border border-slate-100 flex flex-col gap-1">
+            <div className="bg-slate-50 p-4 rounded-2xl border border-slate-100 flex flex-col gap-1 hover:scale-[1.02] hover:shadow-sm transition-all duration-300">
               <span className="text-[10px] text-slate-400 font-bold uppercase">내 누적 점수</span>
-              <span className="text-lg font-black text-[#1e6068]">{userScore.toLocaleString()} 점</span>
+              <span className="text-lg font-black text-[#1e6068]">
+                <AnimatedCounter value={userScore} enabled={animationsEnabled} /> 점
+              </span>
             </div>
-            <div className="bg-slate-50 p-4 rounded-2xl border border-slate-100 flex flex-col gap-1">
+            <div className="bg-slate-50 p-4 rounded-2xl border border-slate-100 flex flex-col gap-1 hover:scale-[1.02] hover:shadow-sm transition-all duration-300">
               <span className="text-[10px] text-slate-400 font-bold uppercase">내 현재 등수</span>
               <span className="text-lg font-black text-slate-700">{rank} 위</span>
             </div>
+          </div>
+
+          {/* Rank division progress chart */}
+          <RankProgressChart score={userScore} />
+
+          {/* Accessibility Option Settings */}
+          <div className="flex items-center justify-between border-t border-slate-100 pt-4 px-1">
+            <div className="flex flex-col gap-0.5">
+              <span className="text-xs font-bold text-[#1e3a47]">화면 애니메이션 효과</span>
+              <span className="text-[10px] text-slate-400 font-medium">부드러운 화면 전환 및 확대 효과 활성화</span>
+            </div>
+            <label className="relative inline-flex items-center cursor-pointer">
+              <input 
+                type="checkbox" 
+                checked={animationsEnabled} 
+                onChange={(e) => {
+                  const val = e.target.checked;
+                  setAnimationsEnabled(val);
+                  localStorage.setItem('block_puzzle_animationsEnabled', val ? 'true' : 'false');
+                }}
+                className="sr-only peer" 
+              />
+              <div className="w-9 h-5 bg-slate-200 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-slate-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-[#1e6068]"></div>
+            </label>
           </div>
 
           {/* Login / logout action buttons */}
@@ -2097,54 +2356,137 @@ export default function BlockPuzzleGame() {
     }
   };
 
+  // ------------------------------------------
+  // BREADCRUMBS & FOOTER DEFINITIONS
+  // ------------------------------------------
+  const renderBreadcrumbs = () => {
+    const items = [{ label: 'Home 🏠', onClick: () => { setScreen('home'); setActiveTab('play'); } }];
+
+    if (activeTab === 'play') {
+      if (screen === 'home') {
+        items.push({ label: 'Play', onClick: () => setScreen('home') });
+      } else if (screen === 'playing') {
+        items.push({ label: 'Play', onClick: () => setScreen('home') });
+        items.push({ label: aiGenerating ? 'AI Generating' : 'Playing Game 🎮', onClick: () => {} });
+      } else if (screen === 'clear') {
+        items.push({ label: 'Play', onClick: () => setScreen('home') });
+        items.push({ label: 'Game Clear 🌸', onClick: () => {} });
+      }
+    } else if (activeTab === 'leaderboard') {
+      items.push({ label: 'Rankings 🏆', onClick: () => {} });
+    } else if (activeTab === 'profile') {
+      items.push({ label: 'Profile & Settings ⚙️', onClick: () => {} });
+    }
+
+    return (
+      <div className="w-full max-w-4xl mx-auto px-6 py-2.5 flex items-center gap-1.5 text-xs text-slate-400 font-semibold bg-white/40 border-b border-slate-200/20 backdrop-blur-sm shadow-sm transition-all duration-300">
+        {items.map((item, idx) => {
+          const isLast = idx === items.length - 1;
+          return (
+            <React.Fragment key={idx}>
+              {idx > 0 && <span className="text-slate-300">/</span>}
+              {isLast ? (
+                <span className="text-[#1e3a47] font-extrabold">{item.label}</span>
+              ) : (
+                <button
+                  onClick={item.onClick}
+                  className="hover:text-[#1e6068] cursor-pointer transition-colors duration-200 font-bold"
+                >
+                  {item.label}
+                </button>
+              )}
+            </React.Fragment>
+          );
+        })}
+      </div>
+    );
+  };
+
+  const renderFooter = () => {
+    return (
+      <footer className="w-full max-w-4xl mx-auto px-6 py-8 border-t border-slate-200/40 text-center text-xs text-slate-400 mt-auto pb-32 flex flex-col items-center gap-3">
+        <div className="flex flex-col gap-1">
+          <p className="font-bold text-slate-500">제작자: 오예림</p>
+          <p className="text-[10px] text-slate-400/80">인천대학교 AI코딩을 활용한 창의적 앱 개발 과제물</p>
+        </div>
+        <div className="flex items-center gap-4 text-[11px] font-semibold">
+          <a
+            href="https://www.inu.ac.kr"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="text-slate-400 hover:text-[#1e6068] hover:scale-[1.02] active:scale-[0.98] transition-all duration-200 underline underline-offset-4"
+          >
+            인천대학교 홈페이지
+          </a>
+          <span className="text-slate-200">|</span>
+          <a
+            href="https://portal.inu.ac.kr"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="text-slate-400 hover:text-[#1e6068] hover:scale-[1.02] active:scale-[0.98] transition-all duration-200 underline underline-offset-4"
+          >
+            INU 포털
+          </a>
+        </div>
+      </footer>
+    );
+  };
+
   // ==========================================
   // 8. Main Render Wrapper
   // ==========================================
   return (
-    <div className="flex flex-col min-h-screen bg-gradient-to-b from-[#f7fafd] to-[#eef3f7] text-[#1e3a47]">
-      
-      {/* Top Header Navigation */}
-      <header className="w-full max-w-4xl mx-auto px-6 py-4 flex items-center justify-between border-b border-slate-200/40">
-        <div 
-          onClick={() => { setActiveTab('play'); setScreen('home'); }}
-          className="text-2xl font-black tracking-tight text-[#1e3a47] cursor-pointer flex items-center gap-1"
-        >
-          block-puzzle
-        </div>
+    <ErrorBoundary>
+      <div className={`flex flex-col min-h-screen bg-gradient-to-b from-[#f7fafd] to-[#eef3f7] text-[#1e3a47] ${!animationsEnabled ? 'no-animations' : ''}`}>
         
-        {/* Right side icon links */}
-        <div className="flex items-center gap-3">
-          <button 
-            onClick={() => setActiveTab('leaderboard')}
-            className={`p-2 rounded-xl transition-all cursor-pointer ${
-              activeTab === 'leaderboard' ? 'bg-[#EAE3D2] text-[#1e3a47]' : 'text-slate-400 hover:bg-slate-100 hover:text-slate-600'
-            }`}
-            title="리더보드 보기"
+        {/* Top Header Navigation */}
+        <header className="w-full max-w-4xl mx-auto px-6 py-4 flex items-center justify-between border-b border-slate-200/40">
+          <div 
+            onClick={() => { setActiveTab('play'); setScreen('home'); }}
+            className="text-2xl font-black tracking-tight text-[#1e3a47] cursor-pointer flex items-center gap-1"
           >
-            <svg className="w-5.5 h-5.5" fill="none" stroke="currentColor" strokeWidth="2.5" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 002 2h2a2 2 0 002-2z" />
-            </svg>
-          </button>
+            block-puzzle
+          </div>
           
-          <button 
-            onClick={() => setActiveTab('profile')}
-            className={`p-2 rounded-xl transition-all cursor-pointer ${
-              activeTab === 'profile' ? 'bg-[#EAE3D2] text-[#1e3a47]' : 'text-slate-400 hover:bg-slate-100 hover:text-slate-600'
-            }`}
-            title="설정 및 프로필"
-          >
-            <svg className="w-5.5 h-5.5" fill="none" stroke="currentColor" strokeWidth="2.5" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
-              <path strokeLinecap="round" strokeLinejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
-            </svg>
-          </button>
-        </div>
-      </header>
+          {/* Right side icon links */}
+          <div className="flex items-center gap-3">
+            <button 
+              onClick={() => setActiveTab('leaderboard')}
+              className={`p-2 rounded-xl transition-all cursor-pointer ${
+                activeTab === 'leaderboard' ? 'bg-[#EAE3D2] text-[#1e3a47]' : 'text-slate-400 hover:bg-slate-100 hover:text-slate-600'
+              }`}
+              title="리더보드 보기"
+            >
+              <svg className="w-5.5 h-5.5" fill="none" stroke="currentColor" strokeWidth="2.5" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 002 2h2a2 2 0 002-2z" />
+              </svg>
+            </button>
+            
+            <button 
+              onClick={() => setActiveTab('profile')}
+              className={`p-2 rounded-xl transition-all cursor-pointer ${
+                activeTab === 'profile' ? 'bg-[#EAE3D2] text-[#1e3a47]' : 'text-slate-400 hover:bg-slate-100 hover:text-slate-600'
+              }`}
+              title="설정 및 프로필"
+            >
+              <svg className="w-5.5 h-5.5" fill="none" stroke="currentColor" strokeWidth="2.5" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
+                <path strokeLinecap="round" strokeLinejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+              </svg>
+            </button>
+          </div>
+        </header>
 
-      {/* Main content body */}
-      <main className="flex-1 flex flex-col items-center justify-center w-full max-w-4xl mx-auto px-4 pt-4 pb-28">
-        {renderContent()}
-      </main>
+        {/* Dynamic Breadcrumbs */}
+        {renderBreadcrumbs()}
+
+        {/* Main content body */}
+        <main className="flex-1 flex flex-col items-center justify-center w-full max-w-4xl mx-auto px-4 pt-4">
+          {renderContent()}
+        </main>
+
+        {/* Premium footer */}
+        {renderFooter()}
 
       {/* Sticky Bottom Tab Bar Navigation */}
       <nav className="fixed bottom-0 left-0 right-0 h-20 bg-white border-t border-slate-100 flex items-center justify-around z-40 px-6 shadow-[0_-5px_25px_rgba(30,58,71,0.03)]">
@@ -2852,6 +3194,7 @@ export default function BlockPuzzleGame() {
         </div>
       )}
 
-    </div>
+      </div>
+    </ErrorBoundary>
   );
 }
