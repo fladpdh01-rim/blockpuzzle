@@ -1462,7 +1462,7 @@ export default function BlockPuzzleGame() {
                       <span className="text-base">🪙</span>
                       <span className="text-xs text-slate-550 font-semibold">Gold</span>
                     </div>
-                    <span className="text-xs font-black text-amber-600">{gold.toLocaleString()} Gold</span>
+                    <span className="text-xs font-black text-amber-600">{gold.toLocaleString()}</span>
                     
                     {/* Tooltip */}
                     <div className="absolute bottom-full left-1/2 transform -translate-x-1/2 mb-2 w-52 bg-slate-900/95 backdrop-blur-md text-white text-[11px] p-2.5 rounded-xl shadow-xl opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all duration-200 z-50 text-center border border-white/10 pointer-events-none scale-95 group-hover:scale-100 leading-normal">
